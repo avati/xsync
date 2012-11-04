@@ -73,13 +73,22 @@ function usage()
 }
 
 
+function SSHM()
+{
+    ssh -qi $SSHKEY \
+	-oPasswordAuthentication=no \
+	-oStrictHostKeyChecking=no \
+	-oControlMaster=yes \
+	-S $SLAVESOCK "$@";
+}
+
 function SSH()
 {
     ssh -qi $SSHKEY \
 	-oPasswordAuthentication=no \
 	-oStrictHostKeyChecking=no \
 	-oControlMaster=auto \
-	-S $SLAVESOCK "$@";
+	-S $SLAVESOCK IDLER.IS.DEAD "$@";
 }
 
 
@@ -344,9 +353,11 @@ function sync_files()
     shift;
     local files="$@";
     if [ "x$TAR_FROM_FUSE" = "xyes" ]; then
-	eval "tar --xattr -b 128 -C '$MOUNT/$PFX' -c $files" | SSH $SLAVEHOST "tar -b 128 -C $SLAVEMOUNT/$PFX -x";
+	eval "tar --xattr -b 128 -C '$MOUNT/$PFX' -c $files" | \
+	    SSH "tar -b 128 -C $SLAVEMOUNT/$PFX -x";
     else
-	eval "tar -b 128 -C '$SCANDIR/$PFX' -c $files" | SSH $SLAVEHOST "tar -b 128 -C $SLAVEMOUNT/$PFX -x";
+	eval "tar -b 128 -C '$SCANDIR/$PFX' -c $files" | \
+	    SSH "tar -b 128 -C $SLAVEMOUNT/$PFX -x";
     fi
 }
 
@@ -574,7 +585,7 @@ $name";
 	# use cpio to create just the directories without contents
 	# (tar cannot do that)
 	echo "$dirs" | (cd "$MOUNT/$PFX" && cpio --quiet --create) | \
-	    SSH $SLAVEHOST "cd $SLAVEMOUNT/$PFX && cpio --quiet --extract"
+	    SSH "cd $SLAVEMOUNT/$PFX && cpio --quiet --extract"
     fi
 
     if [ "x$files" != "x" ]; then
@@ -655,7 +666,7 @@ EOF
 )
     echo "cmdline" >> /tmp/cmdline.log
 
-    SSH $SLAVEHOST bash -c "'$cmd_line'";
+    SSHM $SLAVEHOST bash -c "'$cmd_line'";
 }
 
 
