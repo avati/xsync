@@ -303,11 +303,20 @@ function greater_than()
     local st_usec;
     local ct_sec;
     local ct_usec;
+    local ct_usectmp;
+
+    st_sec=${stime%????????};
+    st_usec=0x${stime#??????????};
 
     ct_sec=${ctime/.*/};
     ct_usec=${ctime/*./};
-    st_sec=${stime%????????}
-    st_usec=0x${stime#??????????}
+    ct_usec=${ct_usec%0}; # strip one trailing 0 always
+
+    ct_usectmp=${ct_usec#0};
+    while [ "$ct_usectmp" != "$ct_usec" ]; do
+	ct_usec=$ct_usectmp;
+	ct_usectmp=${ct_usec#0};
+    done
 
     if [[ $st_sec -ne $ct_sec ]]; then
 	[[ $st_sec -gt $ct_sec ]];
