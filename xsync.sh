@@ -12,7 +12,7 @@
 MASTER=            # example, dp-prod-vol
 SLAVESPEC=         # example, ssh://remote-host::dp-prod-vol-backup
 MOUNT=/unreachable # will get reset in mount_client()
-LOCAL_EXPORTS=     # will get set in gather_local_exports
+declare -A LOCAL_EXPORTS  # will get set in gather_local_exports
 VOLUMEID=
 
 SLAVEHOST=        # extracted from $SLAVESPEC in parse_slave()
@@ -28,6 +28,8 @@ TAR_FROM_FUSE=no  # tar directly from backend or from FUSE mount?
 
 HEARTBEAT_INTERVAL=30  # between idler on salve and master
 PARALLEL_TARS=16   # maximum number of parallel transfers
+
+BRICKS=            # total number of bricks
 
 shopt -s expand_aliases;
 
@@ -56,8 +58,15 @@ function __warn()
 }
 
 
+function __info()
+{
+    msg INFO "$@";
+}
+
+
 alias fatal='__fatal $LINENO';
 alias warn='__warn $LINENO';
+alias info='__info $LINENO';
 
 
 function stderr()
@@ -233,19 +242,25 @@ function gather_local_exports()
     local brick;
     local host;
     local dir;
+    local index;
 
     echo -n "Gathering local bricks ... "
+    index=0
     bricks=$(gluster volume info $MASTER | egrep 'Brick[0-9]+:' | cut -f2- -d:);
     for brick in $bricks; do
 	host=${brick/:*/};
 	dir=${brick/*:/};
 
-	is_host_local $host && LOCAL_EXPORTS="$LOCAL_EXPORTS $dir";
+	is_host_local $host && LOCAL_EXPORTS[$dir]=$index;
+
+	index=$(($index + 1));
     done
+
+    BRICKS=$index;
 
     echo $LOCAL_EXPORTS;
 
-    if [ "x$LOCAL_EXPORTS" = "x" ]; then
+    if [ "x${!LOCAL_EXPORTS[*]}" = "x" ]; then
 	echo "No local exports. Bye.";
 	exit 0;
     fi
@@ -306,9 +321,15 @@ function greater_than()
     local ct_usectmp;
 
     st_sec=${stime%????????};
+    ct_sec=${ctime/.*/};
+
+    if [[ $st_sec -ne $ct_sec ]]; then
+	[[ $st_sec -gt $ct_sec ]];
+	return $?
+    fi
+
     st_usec=0x${stime#??????????};
 
-    ct_sec=${ctime/.*/};
     ct_usec=${ctime/*./};
     ct_usec=${ct_usec%0}; # strip one trailing 0 always
 
@@ -317,11 +338,6 @@ function greater_than()
 	ct_usec=$ct_usectmp;
 	ct_usectmp=${ct_usec#0};
     done
-
-    if [[ $st_sec -ne $ct_sec ]]; then
-	[[ $st_sec -gt $ct_sec ]];
-	return $?
-    fi
 
     [[ $st_usec -gt $ct_usec ]];
 }
@@ -361,13 +377,18 @@ function sync_files()
     local dir=$1;
     shift;
     local files="$@";
+    local srcdir;
+    local dstdir;
+
     if [ "x$TAR_FROM_FUSE" = "xyes" ]; then
-	eval "tar --xattr -b 128 -C '$MOUNT/$PFX' -c $files" | \
-	    SSH "tar -b 128 -C $SLAVEMOUNT/$PFX -x";
+	srcdir="$MOUNT/$PFX";
     else
-	eval "tar -b 128 -C '$SCANDIR/$PFX' -c $files" | \
-	    SSH "tar -b 128 -C $SLAVEMOUNT/$PFX -x";
+	srcdir="$SCANDIR/$PFX";
     fi
+
+    echo -e "$files" | \
+	tar --xattr -b 128 -C "$srcdir" -c --files-from=- | \
+	SSH "tar -b 128 -C $SLAVEMOUNT/$PFX -x";
 }
 
 
@@ -442,7 +463,7 @@ function pending_done()
     if [ $cnt -eq 0 ]; then
 	unset pending[$pfx];
 
-	echo "$BASHPID Completed directory: $pfx ($status)";
+	echo "[$BASHPID] Completed directory: $pfx ($status)";
 
 	# propagate upwards
 	if [ "$status" = "OK" ]; then
@@ -535,22 +556,22 @@ function crawl()
 
     if [ "$xtime" = "0" ]; then
 	true
-#	warn "missing xtime on $1";
-#	return;
+	warn "[$BASHPID] missing xtime on $pfx (returning)";
+	return;
     fi
     # missing stime is 0 stime
 
     if [ "$xtime" = "$stime" ]; then
 	true;
-#	echo "$BASHPID Nothing to do: $pfx (x=$xtime,s=$stime)";
-#	return 0;
+	echo "[$BASHPID] Nothing to do: $pfx (x=$xtime,s=$stime)";
+	return 0;
     fi
 
     # always happens in pair:
     pending_set "$pfx" "$xtime";
     pending_inc "$ppfx";
 
-    echo "$BASHPID Entering directory: $pfx (x=$xtime,s=$stime)";
+    echo "[$BASHPID] Entering directory: $pfx (x=$xtime,s=$stime)";
 
     (cd "$dir"; find . -maxdepth 1 -mindepth 1 -printf "%y '%f' %s %#m %C@\n") > /tmp/xsync.$$.list
 
@@ -564,12 +585,12 @@ function crawl()
 
 	[ "$name" = "." ] && continue;
 
-	if [ "$dir" = "$SCANDIR" -a "$name" = ".glusterfs" ]; then
+	if [ "$name" = ".glusterfs" -a "$dir" = "$SCANDIR" ]; then
 	    # Skipping internal .glusterfs
 	    continue;
 	fi
 
-	if [ "$type" = "f" -a "$mode" = "0100" -a "$size" = "0" ]; then
+	if [ "$mode" = "0100" -a "$size" = "0" -a "$type" = "f" ]; then
 	    # Skipping linkfile
 	    continue;
 	fi
@@ -577,40 +598,33 @@ function crawl()
 	greater_than $stime $ctime && continue;
 
 	if [ "$type" = "d" ]; then
-	    if [ "x$dirs" = "x" ]; then
-		dirs="$name";
-	    else
-		dirs="$dirs
-$name";
-	    fi
+	    dirs="$name\n$dirs";
 	else
-	    files="$files '$name'";
+	    files="$name\n$files";
 	fi
 
     done < /tmp/xsync.$$.list;
 
-    if [ "x$dirs" != "x" ]; then
+    if [ ! -z "$dirs" ]; then
 	# in case directories are missing
 	# use cpio to create just the directories without contents
 	# (tar cannot do that)
-	echo "$dirs" | (cd "$MOUNT/$PFX" && cpio --quiet --create) | \
+	echo -e "$dirs" | (cd "$MOUNT/$PFX" && cpio --quiet --create) | \
 	    SSH "cd $SLAVEMOUNT/$PFX && cpio --quiet --extract"
     fi
 
-    if [ "x$files" != "x" ]; then
+    if [ ! -z "$files" ]; then
 	## TODO check for false positives (xtime != ctime)
 	## and add a doublecheck if necessary
 	throttled_bg sync_files "$dir" "$files";
     fi
 
-    if [ "x$dirs" != "x" ]; then
-	for d in $dirs; do
-	    [ "$d" = "." ] && continue
+    for d in `echo -e "$dirs"`; do
+	[ "$d" = "." ] && continue
 
-	    PFX="$pfx/$d";
-	    crawl "$dir/$d";
-	done
-    fi
+	PFX="$pfx/$d";
+	crawl "$dir/$d";
+    done
 
     pending_dec "$pfx";
 
@@ -623,9 +637,10 @@ $name";
 function worker()
 {
     SCANDIR="$1";
+    INDEX="$2";
     PFX="."
 
-    echo "Starting worker $BASHPID with monitor $MONITOR at $SCANDIR";
+    echo "[$BASHPID] Worker $INDEX/$BRICKS with monitor $MONITOR at $SCANDIR";
     trap 'kill $(jobs -p) 2>/dev/null' EXIT;
 
     while true; do
@@ -737,8 +752,8 @@ function monitor()
 	SLAVEMOUNT=${SLAVEMOUNT:=/proc/$SLAVEPID/cwd};
 	echo "Slave PID is $SLAVEPID. Path is $SLAVEMOUNT";
 
-	for dir in $LOCAL_EXPORTS; do
-	    worker $dir $SLAVEHOST $SLAVEMOUNT &
+	for dir in ${!LOCAL_EXPORTS[*]}; do
+	    worker $dir ${LOCAL_EXPORTS[$dir]} &
 	    ## TODO: just for debugging have single worker
 	    break;
 	done
