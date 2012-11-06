@@ -33,15 +33,22 @@ BRICKS=            # total number of bricks
 
 shopt -s expand_aliases;
 
+
+function out()
+{
+    echo "$@";
+}
+
+
 function msg()
 {
-    local datefmt="+%Y-%m-%d %H:%M:%S";
+    local datefmt="+%Y-%m-%d_%H:%M:%S";
     local lvl=$1;
     shift;
     local line=$1;
     shift;
-    echo "$@" | \
-	(sed "s#\(.*\)#\[`date \"$datefmt\"`\] [`basename $0`:$line] $lvl: \1#" >&2)
+    out -n "[$BASHPID `date \"$datefmt\"` `basename $0`:$line] $lvl: ";
+    out "$@";
 }
 
 
@@ -130,10 +137,10 @@ function parse_slave()
 
     if [[ "$next" =~ .*/.* ]]; then
 	SLAVEMOUNT=$next;
-	echo "Slave path is $SLAVEMOUNT";
+	info "Slave path is $SLAVEMOUNT";
     else
 	SLAVEVOL=$next;
-	echo "Slave volume is $SLAVEVOL";
+	info "Slave volume is $SLAVEVOL";
     fi
 
     [ "x$SLAVEHOST" = "x" ] && fatal "Invalid SLAVESPEC $1";
@@ -190,7 +197,7 @@ function mount_client()
 
     [ "x$i" = "x1" ] || fatal "could not mount volume $MASTER on $T";
 
-    echo "Mounted volume $MASTER";
+    info "Mounted volume $MASTER";
 
     cd $T;
 
@@ -205,7 +212,7 @@ function mount_client()
     MOUNT=/proc/$$/cwd/;
     MONITOR=$$;
 
-    echo "Monitor PID is $MONITOR";
+    info "Monitor PID is $MONITOR";
 }
 
 
@@ -244,7 +251,7 @@ function gather_local_exports()
     local dir;
     local index;
 
-    echo -n "Gathering local bricks ... "
+    info -n "Gathering local bricks ... "
     index=0
     bricks=$(gluster volume info $MASTER | egrep 'Brick[0-9]+:' | cut -f2- -d:);
     for brick in $bricks; do
@@ -258,10 +265,10 @@ function gather_local_exports()
 
     BRICKS=$index;
 
-    echo "${!LOCAL_EXPORTS[*]}";
+    out "${!LOCAL_EXPORTS[*]}";
 
     if [ "x${!LOCAL_EXPORTS[*]}" = "x" ]; then
-	echo "No local exports. Bye.";
+	info "No local exports. Bye.";
 	exit 0;
     fi
 }
@@ -395,7 +402,7 @@ function sync_files()
 function throttled_bg()
 {
     while [ `jobs -pr | wc -l` -ge $PARALLEL_TARS ]; do
-	echo "Throttling. Waiting for (`jobs -pr | wc -l` / $PARALLEL_TARS) jobs".
+	info "Throttling. Waiting for (`jobs -pr | wc -l` / $PARALLEL_TARS) jobs".
 	# This is the point of application of "backpressure" from the WAN
 	sleep 1;
     done
@@ -446,7 +453,7 @@ function pending_done()
     val=${pending[$pfx]};
 
     if [ "x$val" = "x" ]; then
-	echo "ERROR!! $pfx found NULL value!";
+	info "ERROR!! $pfx found NULL value!";
 	exit 1;
     fi
 
@@ -463,7 +470,7 @@ function pending_done()
     if [ $cnt -eq 0 ]; then
 	unset pending[$pfx];
 
-	echo "[$BASHPID] Completed directory: $pfx ($status)";
+	info "Completed: $pfx ($status)";
 
 	# propagate upwards
 	if [ "$status" = "OK" ]; then
@@ -563,7 +570,10 @@ function crawl()
 
     if [ "$xtime" = "$stime" ]; then
 	true;
-	echo "[$BASHPID] Nothing to do: $pfx (x=$xtime,s=$stime)";
+	info "Nothing to do: $pfx (x,s=$xtime)";
+	if [ $PFX = "." ]; then
+	    sleep 4
+	fi
 	return 0;
     fi
 
@@ -571,7 +581,7 @@ function crawl()
     pending_set "$pfx" "$xtime";
     [ "$pfx" != "." ] && pending_inc "$ppfx";
 
-    echo "[$BASHPID] Entering directory: $pfx (x=$xtime,s=$stime)";
+    info "Entering: $pfx (x=$xtime,s=$stime)";
 
     (cd "$dir"; find . -maxdepth 1 -mindepth 1 -printf "%y '%f' %s %#m %C@\n") > /tmp/xsync.$$.list
 
@@ -644,7 +654,7 @@ function worker()
     INDEX="$2";
     PFX="."
 
-    echo "[$BASHPID] Worker $INDEX/$BRICKS with monitor $MONITOR at $SCANDIR";
+    info "Worker $INDEX/$BRICKS with monitor $MONITOR at $SCANDIR";
     trap 'kill $(jobs -p) 2>/dev/null' EXIT;
 
     while true; do
@@ -740,23 +750,23 @@ function monitor()
 	# re-evaluate $RAND for every generation
 	SLAVESOCK=/tmp/xsync-$MONITOR-$RANDOM;
 
-	echo "Starting idler via $SLAVESOCK for $SLAVEHOST:${SLAVEVOL:-$SLAVEMOUNT}";
+	info "Starting idler via $SLAVESOCK for $SLAVEHOST:${SLAVEVOL:-$SLAVEMOUNT}";
 
 	coproc idler;
 
 	set_slave_pid;
 
 	if [ "x$SLAVEPID" = "x" ]; then
-	    echo "Could not establish connectivity with client";
+	    info "Could not establish connectivity with client";
 	    kill $(jobs -p) 2>/dev/null;
 	    wait;
-	    echo "Cleanup done (sleep 60)";
+	    info "Cleanup done (sleep 60)";
 	    sleep 60;
 	    continue;
 	fi
 
 	SLAVEMOUNT=${SLAVEMOUNT:=/proc/$SLAVEPID/cwd};
-	echo "Slave PID is $SLAVEPID. Path is $SLAVEMOUNT";
+	info "Slave PID is $SLAVEPID. Path is $SLAVEMOUNT";
 
 	for dir in ${!LOCAL_EXPORTS[*]}; do
 	    worker $dir ${LOCAL_EXPORTS[$dir]} &
@@ -766,13 +776,13 @@ function monitor()
 
 	keep_idler_busy;
 
-	echo "Idler terimnated. Killing workers"
+	info "Idler terimnated. Killing workers"
 
 	kill $(jobs -p);
 
 	wait;
 
-	echo "Cleanup done (sleep 10)";
+	info "Cleanup done (sleep 10)";
 	sleep 10;
     done
 }
