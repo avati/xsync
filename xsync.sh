@@ -569,13 +569,15 @@ function crawl()
     # missing stime is 0 stime
 
     if [ "$xtime" = "$stime" ]; then
-	true;
-	info "Nothing to do: $pfx (x,s=$xtime)";
-	if [ $PFX = "." ]; then
-	    sleep 4
+	if [ "$silent" != 1 ]; then
+	    info "Nothing to do: $pfx (x,s=$xtime)";
+	fi
+	if [ $PFX = . ]; then
+	    silent=1;
 	fi
 	return 0;
     fi
+    silent=0
 
     # always happens in pair:
     pending_set "$pfx" "$xtime";
