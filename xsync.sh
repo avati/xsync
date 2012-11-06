@@ -29,6 +29,8 @@ TAR_FROM_FUSE=yes  # tar directly from backend or from FUSE mount?
 HEARTBEAT_INTERVAL=30  # between idler on salve and master
 PARALLEL_TARS=16   # maximum number of parallel transfers
 
+PIDFILE=/dev/null  # will get set in parse_cli
+LOGFILE=/dev/stderr # will get set in parse_cli
 BRICKS=            # total number of bricks
 
 shopt -s expand_aliases;
@@ -36,7 +38,7 @@ shopt -s expand_aliases;
 
 function out()
 {
-    echo "$@";
+    echo "$@" >>$LOGFILE;
 }
 
 
@@ -149,11 +151,19 @@ function parse_slave()
 }
 
 
+function abspath()
+{
+    local path="$1";
+
+    [[ "$path" =~ /.* ]] && echo $path || echo `pwd`/$path;
+}
+
+
 function parse_cli()
 {
     local go;
 
-    go=$(getopt -- hi: "$@");
+    go=$(getopt -- hi:p:l: "$@");
     [ $? -eq 0 ] || exit 1;
 
     eval set -- $go;
@@ -162,6 +172,12 @@ function parse_cli()
 	case "$1" in
 	    (-h) usage;;
 	    (-i) SSHKEY=$2; shift;;
+	    (-p) PIDFILE=$2; shift;;
+	    (-l) logfile="`abspath $2`"; shift
+	    info "Log file: $logfile";
+	    LOGFILE=$logfile;
+	    info "===========================================================";
+	    ;;
 	    (--) shift; break;;
 	    (-*) stderr "$0: Unrecognized option $1"; usage;;
 	    (*) warn "Passing $1" ; break;;
@@ -379,7 +395,7 @@ declare -A BG_PIDS;
 
 function sync_files()
 {
-    trap 'kill $(jobs -p) 2>/dev/null' EXIT;
+    trap 'info Cleaning up transfer; kill $(jobs -p) 2>/dev/null' EXIT;
 
     local dir=$1;
     shift;
@@ -657,7 +673,7 @@ function worker()
     PFX="."
 
     info "Worker $INDEX/$BRICKS with monitor $MONITOR at $SCANDIR";
-    trap 'kill $(jobs -p) 2>/dev/null' EXIT;
+    trap 'info Cleaning up worker; kill $(jobs -p) 2>/dev/null' EXIT;
 
     while true; do
 	sleep 1;
@@ -742,7 +758,17 @@ function set_slave_pid()
 
 function monitor()
 {
-    trap 'kill $(jobs -p) $BASHPID $COPROC_PID 2>/dev/null' EXIT;
+    trap 'info Cleaning up master; kill $(jobs -p) $BASHPID $COPROC_PID 2>/dev/null' EXIT;
+
+    if [ ! -z "$PIDFILE" ]; then
+	exec 300>>$PIDFILE;
+
+	[ $? -ne 0 ] && fatal "Unable to open PIDFILE $PIDFILE";
+
+	flock -xn 300 || fatal "PIDFILE $PIDFILE is busy";
+
+	echo $MONITOR >&300;
+    fi
 
     while true; do
 	# re-evaluate $RAND for every generation
