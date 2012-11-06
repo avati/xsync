@@ -258,7 +258,7 @@ function gather_local_exports()
 
     BRICKS=$index;
 
-    echo $LOCAL_EXPORTS;
+    echo "${!LOCAL_EXPORTS[*]}";
 
     if [ "x${!LOCAL_EXPORTS[*]}" = "x" ]; then
 	echo "No local exports. Bye.";
@@ -569,7 +569,7 @@ function crawl()
 
     # always happens in pair:
     pending_set "$pfx" "$xtime";
-    pending_inc "$ppfx";
+    [ "$pfx" != "." ] && pending_inc "$ppfx";
 
     echo "[$BASHPID] Entering directory: $pfx (x=$xtime,s=$stime)";
 
@@ -598,7 +598,11 @@ function crawl()
 	greater_than $stime $ctime && continue;
 
 	if [ "$type" = "d" ]; then
-	    dirs="$name\n$dirs";
+	    if [ -z "$dirs" ]; then
+		dirs="$name";
+	    else
+		dirs="$name\n$dirs";
+	    fi
 	else
 	    files="$name\n$files";
 	fi
@@ -654,9 +658,11 @@ function worker()
 
 	crawl "${SCANDIR}";
 
-	wait;
+	while [ ${#BG_PIDS[*]} -ne 0 ]; do
+	    reap_bg;
+	    sleep 1;
+	done
 
-	reap_bg;
 	if [ ${#BG_PIDS[*]} -ne 0 -o ${#pending[*]} -ne 0 ]; then
 	    echo "!!!BUG!!! non empty pending/BG_PID at end of walk";
 	    echo "Pending: ${!pending[*]}";
