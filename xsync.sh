@@ -164,7 +164,7 @@ function parse_cli()
 	    (-i) SSHKEY=$2; shift;;
 	    (--) shift; break;;
 	    (-*) stderr "$0: Unrecognized option $1"; usage;;
-	    (*) echo "Passing $1" ; break;;
+	    (*) warn "Passing $1" ; break;;
 	esac
 	shift;
     done
@@ -676,9 +676,9 @@ function worker()
 	done
 
 	if [ ${#BG_PIDS[*]} -ne 0 -o ${#pending[*]} -ne 0 ]; then
-	    echo "!!!BUG!!! non empty pending/BG_PID at end of walk";
-	    echo "Pending: ${!pending[*]}";
-	    echo "BG_PIDS: ${!BG_PIDS[*]}";
+	    warn "!!!BUG!!! non empty pending/BG_PID at end of walk";
+	    warn "Pending: ${!pending[*]}";
+	    warn "BG_PIDS: ${!BG_PIDS[*]}";
 	fi
     done
 }
@@ -706,8 +706,6 @@ while true; do
 done
 EOF
 )
-    echo "cmdline" >> /tmp/cmdline.log
-
     SSHM $SLAVEHOST bash -c "'$cmd_line'";
 }
 
@@ -726,8 +724,6 @@ function keep_idler_busy()
 	i=$(($i + 1));
 	sleep 15;
     done
-
-    echo "Failed at i=$i";
 }
 
 
