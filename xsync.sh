@@ -24,7 +24,7 @@ SSHKEY="/var/lib/glusterd/geo-replication/secret.pem"
 MONITOR=          # pid of the monitor
 MOUNT=            # /proc/$MONITOR/cwd
 
-TAR_FROM_FUSE=no  # tar directly from backend or from FUSE mount?
+TAR_FROM_FUSE=yes  # tar directly from backend or from FUSE mount?
 
 HEARTBEAT_INTERVAL=30  # between idler on salve and master
 PARALLEL_TARS=16   # maximum number of parallel transfers
