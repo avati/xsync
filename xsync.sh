@@ -34,6 +34,8 @@ LOGFILE=/dev/stderr # will get set in parse_cli
 STATEFILE=/dev/null # will get set in parse_cli
 BRICKS=            # total number of bricks
 
+REPLICA=1
+
 shopt -s expand_aliases;
 
 
@@ -115,6 +117,7 @@ function parse_master()
 {
     local vol="$1";
     local status;
+    local type;
 
     status=$(gluster volume info $vol | grep Status: | cut -f2 -d:);
     [ "x$status" = "x" ] && fatal "unable to contact volume $vol";
@@ -124,6 +127,12 @@ function parse_master()
 
     VOLUMEID=$(gluster volume info $vol | grep 'Volume ID:' | cut -f3 -d' ');
     [ "x$VOLUMEID" = "x" ] && fatal "no volume ID for volume $MASTER";
+
+    if gluster volume info $vol | grep Type: | grep -iq Replicate; then
+	REPLICA=$(gluster volume info $vol | \
+	    sed -rn 's#Number of Bricks:.*x ([0-9]+) =.*#\1#p');
+    fi
+    info "Replicas in $vol = $REPLICA";
 }
 
 
@@ -668,13 +677,146 @@ function crawl()
 }
 
 
+function top_skip()
+{
+    local index=$1;
+    local name="$2";
+    local ind=$3;
+
+    if [ $(($index % $REPLICA)) -ne $(($ind % $REPLICA)) ]; then
+	info "Skipping $name ($index, $ind, $REPLICA)";
+	return 0;
+    fi
+
+    return 1;
+}
+
+
+function top_crawl()
+{
+    local xtime; # xtime of master
+    local stime; # xtime of slave (maintained on master's copy)
+    local type;
+    local name;
+    local ctime;
+    local files=; # shortlisted
+    local dirs=; # shortlisted
+    local d;
+    local dir;
+    local pfx;
+    local size;
+    local mode;
+    local ppfx;
+
+    dir="$1";
+    pfx="$PFX";
+    ppfx=${pfx%/*};
+
+    get_sxtimes "$dir";
+
+    xtime=$_xtime;
+    stime=$_stime;
+
+    if [ "$xtime" = "0" ]; then
+	true
+	warn "[$BASHPID] missing xtime on $pfx (returning)";
+	return;
+    fi
+    # missing stime is 0 stime
+
+    if [ "$xtime" = "$stime" ]; then
+	if [ "$silent" != 1 ]; then
+	    info "Nothing to do: $pfx (x,s=$xtime)";
+	fi
+	if [ $PFX = . ]; then
+	    silent=1;
+	fi
+	return 0;
+    fi
+    silent=0
+
+    # always happens in pair:
+    pending_set "$pfx" "$xtime";
+    [ "$pfx" != "." ] && pending_inc "$ppfx";
+
+    info "Entering: $pfx (x=$xtime,s=$stime)";
+
+    (cd "$dir"; find . -maxdepth 1 -mindepth 1 -printf "%y '%f' %s %#m %C@\n" | sort) > /tmp/xsync.$$.list
+
+    ind=0
+    while read line; do
+	eval "set $line";
+	type=$1;
+	name=$2;
+	size=$3;
+	mode=$4;
+	ctime=$5;
+
+	ind=$(($ind + 1));
+	[ "$name" = "." ] && continue;
+
+	if [ "$name" = ".glusterfs" -a "$dir" = "$SCANDIR" ]; then
+	    # Skipping internal .glusterfs
+	    continue;
+	fi
+
+	if [ "$mode" = "0100" -a "$size" = "0" -a "$type" = "f" ]; then
+	    # Skipping linkfile
+	    continue;
+	fi
+
+	greater_than $stime $ctime && continue;
+
+	top_skip $INDEX $name $ind && continue;
+
+	if [ "$type" = "d" ]; then
+	    if [ -z "$dirs" ]; then
+		dirs="$name";
+	    else
+		dirs="$name\n$dirs";
+	    fi
+	else
+	    files="$name\n$files";
+	fi
+
+    done < /tmp/xsync.$$.list;
+
+    if [ ! -z "$dirs" ]; then
+	# in case directories are missing
+	# use cpio to create just the directories without contents
+	# (tar cannot do that)
+	echo -e "$dirs" | (cd "$MOUNT/$PFX" && cpio --quiet --create) | \
+	    SSH "cd $SLAVEMOUNT/$PFX && cpio --quiet --extract"
+    fi
+
+    if [ ! -z "$files" ]; then
+	## TODO check for false positives (xtime != ctime)
+	## and add a doublecheck if necessary
+	throttled_bg sync_files "$dir" "$files";
+    fi
+
+    for d in `echo -e "$dirs"`; do
+	[ "$d" = "." ] && continue
+
+	PFX="$pfx/$d";
+	crawl "$dir/$d";
+    done
+
+    pending_dec "$pfx";
+
+    reap_bg;
+
+    return 0;
+}
+
+
 function worker()
 {
     SCANDIR="$1";
     INDEX="$2";
     PFX="."
 
-    info "Worker $INDEX/$BRICKS with monitor $MONITOR at $SCANDIR";
+    info "Worker $INDEX/$BRICKS (R=$REPLICA) with monitor $MONITOR at $SCANDIR";
     trap 'info Cleaning up worker; kill $(jobs -p) 2>/dev/null' EXIT;
 
     while true; do
@@ -686,7 +828,7 @@ function worker()
 	unset pending[*]; declare -A pending; # start fresh
 	unset BG_PIDS[*]; declare -A BG_PIDS;
 
-	crawl "${SCANDIR}";
+	top_crawl "${SCANDIR}";
 
 	while [ ${#BG_PIDS[*]} -ne 0 ]; do
 	    reap_bg;
