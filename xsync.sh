@@ -414,7 +414,7 @@ function sync_files()
     local srcdir;
     local dstdir;
 
-    if [ "x$TAR_FROM_FUSE" = "xyes" ]; then
+    if [ "$TAR_FROM_FUSE" = "yes" ]; then
 	srcdir="$MOUNT/$PFX";
     else
 	srcdir="$SCANDIR/$PFX";
@@ -652,8 +652,13 @@ function crawl()
 	# in case directories are missing
 	# use cpio to create just the directories without contents
 	# (tar cannot do that)
-	echo -e "$dirs" | (cd "$MOUNT/$PFX" && cpio --quiet --create) | \
-	    SSH "cd $SLAVEMOUNT/$PFX && cpio --quiet --extract"
+	if [ "$TAR_FROM_FUSE" = "yes" ]; then
+	    echo -e "$dirs" | (cd "$MOUNT/$PFX" && cpio --quiet --create) | \
+		SSH "cd $SLAVEMOUNT/$PFX && cpio --quiet --extract";
+	else
+	    echo -e "$dirs" | (cd "$SCANDIR/$PFX" && cpio --quiet --create) | \
+		SSH "cd $SLAVEMOUNT/$PFX && cpio --quiet --extract";
+	fi
     fi
 
     if [ ! -z "$files" ]; then
