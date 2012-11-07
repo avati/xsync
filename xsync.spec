@@ -17,10 +17,10 @@ xtime based remote synchronization for glusterfs (crawling from the backend)
 
 %install
 rm -rf $RPM_BUILD_ROOT
-mkdir -p $RPM_BUILD_ROOT/usr/bin
+mkdir -p $RPM_BUILD_ROOT/usr/libexec/glusterfs
 
-install -m755 gsyncd $RPM_BUILD_ROOT/usr/bin/gsyncd
-install -m755 xsync $RPM_BUILD_ROOT/usr/bin/xsync
+install -m755 gsyncd $RPM_BUILD_ROOT/usr/libexec/glusterfs/gsyncd
+install -m755 xsync.sh $RPM_BUILD_ROOT/usr/libexec/glusterfs/xsync
 
 %clean
 rm -rf $RPM_BUILD_ROOT
@@ -28,8 +28,8 @@ rm -rf $RPM_BUILD_ROOT
 %files
 %defattr(-,root,root)
 %doc README.md
-%{_bindir}/gsyncd
-%{_bindir}/xsync
+/usr/libexec/glusterfs/gsyncd
+/usr/libexec/glusterfs/xsync
 
 %changelog
 * Wed Nov 7 2012 Harshavardhana <fharshav@redhat.com> - 0.0.1-1

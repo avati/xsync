@@ -230,7 +230,7 @@ function do_monitor()
 
     echo -n NOK > "`state_file`";
 
-    setsid /usr/bin/xsync \
+    setsid `dirname $0`/xsync \
 	-p "`pid_file`" \
 	-l "`log_file`" \
 	-s "`state_file`" \
