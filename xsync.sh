@@ -27,7 +27,7 @@ MOUNT=            # /proc/$MONITOR/cwd
 TAR_FROM_FUSE=yes  # tar directly from backend or from FUSE mount?
 
 HEARTBEAT_INTERVAL=30  # between idler on salve and master
-PARALLEL_TARS=16   # maximum number of parallel transfers
+PARALLEL_TARS=3   # maximum number of parallel transfers
 
 PIDFILE=/dev/null  # will get set in parse_cli
 LOGFILE=/dev/stderr # will get set in parse_cli
@@ -35,6 +35,9 @@ STATEFILE=/dev/null # will get set in parse_cli
 BRICKS=            # total number of bricks
 
 REPLICA=1
+
+DEBUG=${DEBUG:-0}    # set to 1 to enable debugging
+
 
 shopt -s expand_aliases;
 
@@ -76,9 +79,18 @@ function __info()
 }
 
 
+function __dbg()
+{
+    [ $DEBUG -eq 0 ] && return;
+
+    msg DEBUG "$@";
+}
+
+
 alias fatal='__fatal $LINENO';
 alias warn='__warn $LINENO';
 alias info='__info $LINENO';
+alias dbg='__dbg $LINENO';
 
 
 function stderr()
@@ -432,7 +444,7 @@ function sync_files()
 function throttled_bg()
 {
     while [ `jobs -pr | wc -l` -ge $PARALLEL_TARS ]; do
-	info "Throttling. Waiting for (`jobs -pr | wc -l` / $PARALLEL_TARS) jobs".
+	dbg "Throttling. Waiting for (`jobs -pr | wc -l` / $PARALLEL_TARS) jobs".
 	# This is the point of application of "backpressure" from the WAN
 	sleep 1;
     done
@@ -500,20 +512,22 @@ function pending_done()
     if [ $cnt -eq 0 ]; then
 	unset pending[$pfx];
 
-	info "Completed: $pfx ($status)";
-
 	# propagate upwards
 	if [ "$status" = "OK" ]; then
             # old xtime now becomes new stime, and will match new xtime if
             # no changes happened while we were crawling
+	    dbg "Completed: $pfx ($status)";
+
 
 	    set_stime "${SCANDIR}/$pfx" "$2";
+	else
+	    info "Failed: $pfx";
 	fi
 
 	ppfx="${pfx%/*}";
 	[ "$ppfx" = "$pfx" ] && return;
 
-	pending_done "$ppfx" "$s";
+	pending_done "$ppfx" "$status";
     fi
 
 }
@@ -613,9 +627,11 @@ function crawl()
     pending_set "$pfx" "$xtime";
     [ "$pfx" != "." ] && pending_inc "$ppfx";
 
-    info "Entering: $pfx (x=$xtime,s=$stime)";
+    dbg "Entering: $pfx (x=$xtime,s=$stime)";
 
-    (cd "$dir"; find . -maxdepth 1 -mindepth 1 -printf "%y '%f' %s %#m %C@\n") > /tmp/xsync.$$.list
+    local file=/tmp/xsync.$BASHPID.list;
+
+    (cd "$dir"; find . -maxdepth 1 -mindepth 1 -printf "%y '%f' %s %#m %C@\n") > $file;
 
     while read line; do
 	eval "set $line";
@@ -637,7 +653,10 @@ function crawl()
 	    continue;
 	fi
 
-	greater_than $stime $ctime && continue;
+	if greater_than $stime $ctime; then
+	    dbg "Pruned $PFX/$name (s=$stime,c=$ctime)";
+	    continue;
+	fi
 
 	if [ "$type" = "d" ]; then
 	    if [ -z "$dirs" ]; then
@@ -649,7 +668,8 @@ function crawl()
 	    files="$name\n$files";
 	fi
 
-    done < /tmp/xsync.$$.list;
+    done < $file;
+    rm -rf $file;
 
     if [ ! -z "$dirs" ]; then
 	# in case directories are missing
@@ -690,6 +710,8 @@ function top_skip()
     local index=$1;
     local name="$2";
     local ind=$3;
+
+    ## TODO: disable skipping when the other server is down
 
     if [ $(($index % $REPLICA)) -ne $(($ind % $REPLICA)) ]; then
 	info "Skipping $name ($index, $ind, $REPLICA)";
@@ -749,7 +771,8 @@ function top_crawl()
 
     info "Entering: $pfx (x=$xtime,s=$stime)";
 
-    (cd "$dir"; find . -maxdepth 1 -mindepth 1 -printf "%y '%f' %s %#m %C@\n" | sort) > /tmp/xsync.$$.list
+    file=/tmp/xsync.$BASHPID.list;
+    (cd "$dir"; find . -maxdepth 1 -mindepth 1 -printf "%y '%f' %s %#m %C@\n" | sort) > $file;
 
     ind=0
     while read line; do
@@ -773,7 +796,10 @@ function top_crawl()
 	    continue;
 	fi
 
-	greater_than $stime $ctime && continue;
+	if greater_than $stime $ctime; then
+	    dbg "Pruned $PFX/$name (s=$stime,c=$ctime)";
+	    continue;
+	fi
 
 	top_skip $INDEX $name $ind && continue;
 
@@ -787,7 +813,9 @@ function top_crawl()
 	    files="$name\n$files";
 	fi
 
-    done < /tmp/xsync.$$.list;
+    done < $file;
+
+    rm -f $file;
 
     if [ ! -z "$dirs" ]; then
 	# in case directories are missing
@@ -948,6 +976,7 @@ function monitor()
 
 	for dir in ${!LOCAL_EXPORTS[*]}; do
 	    worker $dir ${LOCAL_EXPORTS[$dir]} &
+	    sleep 0.1
 	done
 
 	keep_idler_busy;
