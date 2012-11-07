@@ -31,6 +31,7 @@ PARALLEL_TARS=16   # maximum number of parallel transfers
 
 PIDFILE=/dev/null  # will get set in parse_cli
 LOGFILE=/dev/stderr # will get set in parse_cli
+STATEFILE=/dev/null # will get set in parse_cli
 BRICKS=            # total number of bricks
 
 shopt -s expand_aliases;
@@ -163,7 +164,7 @@ function parse_cli()
 {
     local go;
 
-    go=$(getopt -- hi:p:l: "$@");
+    go=$(getopt -- hi:p:l:s: "$@");
     [ $? -eq 0 ] || exit 1;
 
     eval set -- $go;
@@ -173,6 +174,7 @@ function parse_cli()
 	    (-h) usage;;
 	    (-i) SSHKEY=$2; shift;;
 	    (-p) PIDFILE=$2; shift;;
+	    (-s) STATEFILE=$2; shift;;
 	    (-l) logfile="`abspath $2`"; shift
 	    info "Log file: $logfile";
 	    LOGFILE=$logfile;
@@ -739,7 +741,9 @@ function keep_idler_busy()
 	read -t $HEARTBEAT_INTERVAL pong <&${COPROC[0]} || break;
 	i=$(($i + 1));
 	sleep 15;
+	echo -n OK > $STATEFILE;
     done
+    echo -n NOK > $STATEFILE;
 }
 
 
@@ -758,7 +762,7 @@ function set_slave_pid()
 
 function monitor()
 {
-    trap 'info Cleaning up master; kill $(jobs -p) $BASHPID $COPROC_PID 2>/dev/null' EXIT;
+    trap 'info Cleaning up master; kill $(jobs -p) $BASHPID $COPROC_PID 2>/dev/null; echo -n NOK > $STATEFILE' EXIT;
 
     if [ ! -z "$PIDFILE" ]; then
 	exec 300>>$PIDFILE;
