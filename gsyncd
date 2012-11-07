@@ -1,0 +1,296 @@
+#!/bin/bash
+
+VERSION="gsyncd.sh 0.0.1";
+
+GSYNCD_LOPTS="version,canonicalize-url,normalize-url,config-get:,config-get-all,config-set,config-set-rx,monitor,session-owner:,listen,timeout:"
+GSYNCD_SOPTS="c:N"
+
+CONFIG_FILE=
+NO_DAEMON=
+SESSION_OWNER=
+
+ARGS=
+MASTER=
+SLAVE=
+
+ACT=
+URL=
+KEY=
+VAL=
+
+TIMEOUT=
+
+VLIBGG="/var/lib/glusterd/geo-replication";
+VLOGGG="/var/log/glusterfs/geo-replication";
+
+SSHKEY="/var/lib/glusterd/geo-replication/secret.pem";
+
+function resolve_ip()
+{
+    local host;
+
+    host="$1";
+
+    ping -c 1 -w 1 "$host" 2>/dev/null | \
+	head -1 | \
+        awk '{print $3}' | \
+	sed 's/(\(.*\))/\1/g';
+}
+
+
+function is_host_local()
+{
+    local host;
+    local ip;
+
+    host="$1";
+    ip=$(resolve_ip "$host");
+
+    [ "x$ip" = "x" ] && return 1;
+
+    ping -I "$ip" -w 1 -c 1 localhost >/dev/null 2>&1
+}
+
+
+function fileize()
+{
+    URL=$1;
+    canonicalize_url $URL | tr '@:/_' '----';
+}
+
+
+function masterize()
+{
+    echo $1 | sed 's/^://g';
+}
+
+
+function canonicalize_url()
+{
+    URL=$1;
+    (
+	if [[ $URL =~ ssh://[^:]+:.* ]]; then
+	    user_host=`echo $URL | sed -r 's#ssh://([^:]+):.*#\1#'`;
+	    res=`echo $URL | sed -r 's#ssh://[^:]+:(.*)#\1#'`
+	    user=`echo $user_host | sed -nr 's#([^@]+)@.*#\1#p'`
+	    host=`echo $user_host | sed 's#^[^@]*@##g'`
+	    ip=`resolve_ip $host 2>/dev/null`;
+	    [ -z "$user" ] && user=root
+	    echo "ssh://${user}@${ip}:$res";
+	else
+	    echo $URL;
+	fi
+    ) | sed "s#::#:gluster://127.0.0.1:#g"
+}
+
+
+function canonicalize_all()
+{
+    set $ARGS;
+
+    while [ $# -gt 0 ]; do
+	canonicalize_url $1;
+	shift;
+    done
+}
+
+
+function normalize_url()
+{
+    URL=$1;
+
+    echo $URL | \
+	sed -r 's#:gluster://127.0.0.1:#::#g' | \
+	sed -r 's#ssh://root@#ssh://#g' | \
+	sed -r 's#([/:@])127.0.0.1([/:])#\1localhost\2#'
+}
+
+
+function normalize_all()
+{
+    set $ARGS;
+
+    while [ $# -gt 0 ]; do
+	normalize_url $1;
+	shift;
+    done
+}
+
+
+function pid_file()
+{
+    echo "$VLIBGG"/"`masterize $MASTER`"/"`fileize $SLAVE`".pid;
+}
+
+
+function log_file()
+{
+    echo "$VLOGGG"/"`masterize $MASTER`"/"`fileize $SLAVE`".log;
+}
+
+
+function state_file()
+{
+    echo "$VLIBGG"/"`masterize $MASTER`"/"`fileize $SLAVE`".status;
+}
+
+
+function config_get()
+{
+    case "$KEY" in
+	(pid-file) pid_file;;
+	(state-file) state_file;;
+    esac
+}
+
+
+function config_get_all()
+{
+    cat <<EOF
+state_file: `state_file`
+pid_file: `pid_file`
+log_file: `log_file`
+state_socket_unencoded: /dev/null
+EOF
+
+}
+
+
+function config_set()
+{
+    true;
+}
+
+
+function config_set_rx()
+{
+    true;
+}
+
+
+function SSH()
+{
+    ssh -qi $SSHKEY \
+        -oPasswordAuthentication=no \
+        -oStrictHostKeyChecking=no \
+        "$@";
+}
+
+
+function balance_slave()
+{
+    norm_slave=$1;
+    master_vol=$2;
+
+    user_host=`echo $norm_slave | sed -r 's#ssh://([^:]+):.*#\1#'`;
+    slave_vol=`echo $norm_slave | sed -r 's#ssh://[^:]+::(.*)#\1#'`
+    userat=`echo $user_host | sed -nr 's#([^@]+@).*#\1#p'`
+    host=`echo $user_host | sed 's#^[^@]*@##g'`
+
+    master_servers=`gluster volume info $master_vol 2>/dev/null | grep -E 'Brick[0-9]+:' | cut -f2 -d: | sort | uniq`;
+    slave_servers=`SSH $user_host gluster volume info $slave_vol 2>/dev/null | grep -E 'Brick[0-9]+:' | cut -f2 -d: | sort | uniq`;
+
+    mcnt=0;
+    for m in $master_servers; do
+	is_host_local $m && break;
+	mcnt=$(($mcnt + 1));
+    done
+
+    scnt=0;
+    for s in $slave_servers; do
+	scnt=$(($scnt + 1));
+    done
+
+    if [ $scnt -eq 0 ]; then
+	echo $norm_slave;
+	return 0;
+    fi
+
+    cnt=$(($mcnt % $scnt));
+    scnt=0;
+    for s in $slave_servers; do
+	[ $cnt -eq $scnt ] && break;
+	scnt=$(($scnt + 1));
+    done
+
+    if ! SSH "${userat}${s}" gluster volume info $slave_vol >/dev/null 2>&1 ; then
+	echo $norm_slave;
+	return 0;
+    fi
+
+    echo "ssh://${userat}${s}::${slave_vol}";
+}
+
+
+function do_monitor()
+{
+    norm_slave="`normalize_url $SLAVE`";
+    master_vol="`masterize $MASTER`";
+    bal_slave="`balance_slave $norm_slave $master_vol`";
+
+    echo -n NOK > "`state_file`";
+
+    setsid xsync.sh \
+	-p "`pid_file`" \
+	-l "`log_file`" \
+	-s "`state_file`" \
+	$master_vol \
+	$bal_slave \
+	>/dev/null 2>&1 &
+}
+
+function monitor()
+{
+    do_monitor &
+}
+
+
+function listen()
+{
+    true;
+}
+
+
+function main()
+{
+    echo "$@" >> /tmp/gsyncd.log;
+
+    go=$(getopt -l $GSYNCD_LOPTS $GSYNCD_SOPTS "$@");
+    [ $? -eq 0 ] || exit 1;
+
+    eval set -- $go;
+
+    while [ $# -gt 0 ]; do
+	case "$1" in
+	    (-c) CONFIG_FILE="$2"; shift;;
+	    (-N) NO_DAEMON=y;;
+	    (--timeout) TIMEOUT="$2"; shift;;
+	    (--session-owner) SESSION_OWNER="$2"; shift;;
+
+	    (--version) echo "$VERSION"; exit 0;;
+
+	    (--canonicalize-url) ACT=canonicalize_all;;
+	    (--normalize-url) ACT=normalize_all;;
+	    (--config-get) ACT=config_get; KEY="$2"; shift;;
+	    (--config-get-all) ACT=config_get_all;;
+	    (--config-set) ACT=config_set; KEY="$2"; shift;;
+	    (--config-set-rx) ACT=config_set_rx; KEY="$2"; shift;;
+	    (--monitor) ACT=monitor;;
+	    (--listen) ACT=listen;;
+
+	    (--) shift; break;;
+	    (-*) echo "Unrecognized option $1"; exit 1;;
+	esac
+	shift;
+    done
+
+    ARGS="$@";
+
+    MASTER=$1;
+    SLAVE=$2;
+    VAL=$3; # for config_set
+
+    [ ! -z "$ACT" ] && $ACT;
+}
+
+main "$@";

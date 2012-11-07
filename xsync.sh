@@ -798,8 +798,6 @@ function monitor()
 
 	for dir in ${!LOCAL_EXPORTS[*]}; do
 	    worker $dir ${LOCAL_EXPORTS[$dir]} &
-	    ## TODO: just for debugging have single worker
-	    break;
 	done
 
 	keep_idler_busy;
