@@ -1,10 +1,10 @@
 Summary: xtime based remote synchronization for glusterfs
-Name: xsync
-Version: 0.0.1
+Name: glusterfs-xsync
+Version: 0.1
 Release: 1%{?dist}
 License: LGPLv3
 Group: System Environment/Base
-URL: http://github.com/avati/xsync/downloads/%{name}-%{version}.tar.gz
+URL: https://github.com/avati/xsync
 Source0: %{name}-%{version}.tar.gz
 BuildArch: noarch
 BuildRoot: %{_tmppath}/%{name}-%{version}-%{release}-root-%(%{__id_u} -n)
@@ -17,7 +17,7 @@ xtime based remote synchronization for glusterfs (crawling from the backend)
 
 %install
 rm -rf $RPM_BUILD_ROOT
-mkdir -p $RPM_BUILD_ROOT/usr/bin
+mkdir -p $RPM_BUILD_ROOT/usr/libexec/glusterfs
 
 install -m755 gsyncd $RPM_BUILD_ROOT/usr/libexec/glusterfs/gsyncd
 install -m755 xsync.sh $RPM_BUILD_ROOT/usr/libexec/glusterfs/xsync
@@ -28,8 +28,8 @@ rm -rf $RPM_BUILD_ROOT
 %files
 %defattr(-,root,root)
 %doc README.md
-%{_bindir}/gsyncd
-%{_bindir}/xsync
+/usr/libexec/glusterfs/gsyncd
+/usr/libexec/glusterfs/xsync
 
 %changelog
 * Wed Nov 7 2012 Harshavardhana <fharshav@redhat.com> - 0.0.1-1
