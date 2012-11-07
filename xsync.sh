@@ -767,7 +767,7 @@ function monitor()
 
 	flock -xn 300 || fatal "PIDFILE $PIDFILE is busy";
 
-	echo $MONITOR >&300;
+	echo $MONITOR >$PIDFILE;
     fi
 
     while true; do
