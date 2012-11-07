@@ -413,15 +413,18 @@ function sync_files()
     local files="$@";
     local srcdir;
     local dstdir;
+    local xatt;
 
     if [ "$TAR_FROM_FUSE" = "yes" ]; then
 	srcdir="$MOUNT/$PFX";
+	xatt="--xattr";
     else
 	srcdir="$SCANDIR/$PFX";
+	xatt=;
     fi
 
     echo -e "$files" | \
-	tar --xattr -b 128 -C "$srcdir" -c --files-from=- | \
+	tar "$xatt" -b 128 -C "$srcdir" -c --files-from=- | \
 	SSH "tar -b 128 -C $SLAVEMOUNT/$PFX -x";
 }
 
