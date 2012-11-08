@@ -919,9 +919,9 @@ function keep_idler_busy()
 	read -t $HEARTBEAT_INTERVAL pong <&${COPROC[0]} || break;
 	i=$(($i + 1));
 	sleep 15;
-	echo -n OK > $STATEFILE;
+	echo -n "`hostname`-$SLAVEHOST:OK" > $STATEFILE;
     done
-    echo -n NOK > $STATEFILE;
+    echo -n "`hostname`-$SLAVEHOST:NOK" > $STATEFILE;
 }
 
 
