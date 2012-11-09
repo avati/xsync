@@ -34,10 +34,12 @@ LOGFILE=/dev/stderr # will get set in parse_cli
 STATEFILE=/dev/null # will get set in parse_cli
 BRICKS=            # total number of bricks
 
+SRCDIR=            # set to either MOUNT or SCANDIR based on TAR_FROM_FUSE
+
 REPLICA=1
 
 DEBUG=${DEBUG:-0}    # set to 1 to enable debugging
-
+STATS=${STATS:-0}    # set to 1 to enable statistics
 
 shopt -s expand_aliases;
 
@@ -353,6 +355,24 @@ function get_sxtimes()
 	    _stime=$val;
 	fi
     done
+
+    if [ $_stime = 0 -o $_stime = 0x0 ]; then
+	_stime=0;
+	out=$(SSH sh -c "'getfattr -h -e hex -d -m trusted.glusterfs.$VOLUMEID.xtime $SLAVEMOUNT/$PFX 2>/dev/null'");
+	for l in $out; do
+	    if ! [[ $l =~ .*=.* ]] ; then
+		continue;
+	    fi
+
+	    key=${l/=*/};
+	    val=${l/*=/};
+
+	    # yes, remote xtime will be local stime
+	    if [ $key = "trusted.glusterfs.$VOLUMEID.xtime" ]; then
+		_stime=$val;
+	    fi
+	done
+    fi
 }
 
 
@@ -386,6 +406,15 @@ function greater_than()
     done
 
     [[ $st_usec -gt $ct_usec ]];
+}
+
+
+function array_nl()
+{
+    while [ $# -gt 0 ]; do
+	echo "$1";
+	shift;
+    done
 }
 
 
@@ -428,15 +457,13 @@ function sync_files()
     local xatt;
 
     if [ "$TAR_FROM_FUSE" = "yes" ]; then
-	srcdir="$MOUNT/$PFX";
 	xatt="--xattr";
     else
-	srcdir="$SCANDIR/$PFX";
 	xatt=;
     fi
 
-    echo -e "$files" | \
-	tar "$xatt" -b 128 -C "$srcdir" -c --files-from=- | \
+    array_nl "$@" | \
+	tar $xatt -b 128 -C "$SRCDIR/$PFX" -c --files-from=- | \
 	SSH "tar -b 128 -C $SLAVEMOUNT/$PFX -x";
 }
 
@@ -446,7 +473,8 @@ function throttled_bg()
     while [ `jobs -pr | wc -l` -ge $PARALLEL_TARS ]; do
 	dbg "Throttling. Waiting for (`jobs -pr | wc -l` / $PARALLEL_TARS) jobs".
 	# This is the point of application of "backpressure" from the WAN
-	sleep 1;
+	sleep 0.1;
+	inc_throttle;
     done
 
     "$@" &
@@ -462,7 +490,7 @@ function pending_set()
 
     pfx="$1";
 
-    pending[$pfx]="1 $2 OK";
+    pending["$pfx"]="1 $2 OK";
 }
 
 
@@ -473,9 +501,9 @@ function pending_inc()
 
     pfx="$1";
 
-    val=${pending[$pfx]};
+    val=${pending["$pfx"]};
     set $val;
-    pending[$pfx]="$(($1 + 1)) $2 $3";
+    pending["$pfx"]="$(($1 + 1)) $2 $3";
 }
 
 
@@ -492,7 +520,7 @@ function pending_done()
     pfx="$1";
     s="$2";
 
-    val=${pending[$pfx]};
+    val=${pending["$pfx"]};
 
     if [ "x$val" = "x" ]; then
 	info "ERROR!! $pfx found NULL value!";
@@ -507,17 +535,18 @@ function pending_done()
 
     cnt=$(($cnt - 1));
 
-    pending[$pfx]="$cnt $xtime $status";
+    pending["$pfx"]="$cnt $xtime $status";
 
     if [ $cnt -eq 0 ]; then
-	unset pending[$pfx];
+	unset pending['$pfx'];
+
+	stats_dump;
 
 	# propagate upwards
 	if [ "$status" = "OK" ]; then
             # old xtime now becomes new stime, and will match new xtime if
             # no changes happened while we were crawling
 	    dbg "Completed: $pfx ($status)";
-
 
 	    set_stime "${SCANDIR}/$pfx" "$2";
 	else
@@ -570,13 +599,175 @@ function reap_bg()
 
 	    if [ $s -eq 0 ]; then
 		# successful remote untar
-		pending_dec $pfx;
+		pending_dec "$pfx";
 	    else
 		# failed remote untar
-		pending_err $pfx;
+		pending_err "$pfx";
 	    fi
 	fi
     done
+}
+
+
+TOT_START=0
+INT_START=0
+
+TOT_ENTRIES=0
+INT_ENTRIES=0
+
+TOT_DIRS=0
+INT_DIRS=0
+
+TOT_DESC=0
+INT_DESC=0
+
+TOT_FILES=0
+INT_FILES=0
+
+TOT_XFER=0
+INT_XFER=0
+
+TOT_SIZE=0
+INT_SIZE=0
+
+function inc()
+{
+    val=$1;
+    by=${2:-1};
+
+    bump=1;
+
+    eval "TOT_${val}=\$((\$TOT_${val} + $by))";
+    eval "INT_${val}=\$((\$INT_${val} + $by))";
+}
+
+function inc_entries()
+{
+    inc ENTRIES;
+}
+
+function inc_dirs()
+{
+    inc DIRS;
+}
+
+function inc_desc()
+{
+    inc DESC;
+}
+
+function inc_files()
+{
+    inc FILES;
+}
+
+function inc_xfer()
+{
+    inc XFER;
+}
+
+function inc_size()
+{
+    inc SIZE $1;
+}
+
+function inc_xfer_size()
+{
+    inc_xfer;
+    inc_size $1;
+}
+
+function inc_entry()
+{
+    inc_entries;
+    if [ $1 = d ]; then
+	inc_dirs;
+    else
+	inc_files;
+    fi
+}
+
+function inc_throttle()
+{
+    inc THROTTLE;
+}
+
+function stats_dump()
+{
+    [ $bump -eq 0 ] && return;
+    bump=0;
+
+    now=`date '+%s'`;
+
+    then=$INT_START;
+    INT_START=$now;
+
+    (
+    cat <<EOF
+Field Interval Total
+Time $(($now - $then))s $(($now - $TOT_START))s
+Scanned_Entries $INT_ENTRIES $TOT_ENTRIES
+Scanned_Dirs $INT_DIRS $TOT_DIRS
+Descended_Dirs $INT_DESC $TOT_DESC
+Scanned_Files $INT_FILES $TOT_FILES
+Xfered_Files $INT_XFER $TOT_XFER
+Xfered_Size $INT_SIZE $TOT_SIZE
+Throttle_CentiSecs $INT_THROTTLE $TOT_THROTTLE
+EOF
+    ) | column -tc 3
+    echo "==========================================="
+
+    INT_START=$now;
+    INT_ENTRIES=0
+    INT_DIRS=0
+    INT_DESC=0
+    INT_FILES=0
+    INT_XFER=0
+    INT_SIZE=0
+    INT_THROTTLE=0
+}
+
+
+function stats_wipe()
+{
+    now=`date '+%s'`;
+
+    TOT_START=$now
+    TOT_ENTRIES=0
+    TOT_DIRS=0
+    TOT_DESC=0
+    TOT_FILES=0
+    TOT_XFER=0
+    TOT_SIZE=0
+    TOT_THROTTLE=0
+
+    INT_START=$now;
+    INT_ENTRIES=0
+    INT_DIRS=0
+    INT_DESC=0
+    INT_FILES=0
+    INT_XFER=0
+    INT_SIZE=0
+    INT_THROTTLE=0
+}
+
+
+function do_statify()
+{
+    while [ $# -gt 0 ]; do
+	if [ $STATS = 0 ]; then
+	    eval "unset -f $1";
+	    eval "function $1() { true; }";
+	fi
+	shift;
+    done
+}
+
+
+function statify()
+{
+    do_statify stats_dump stats_wipe
+    do_statify inc_entry inc_xfer_size inc_desc inc_throttle;
 }
 
 
@@ -587,8 +778,8 @@ function crawl()
     local type;
     local name;
     local ctime;
-    local files=; # shortlisted
-    local dirs=; # shortlisted
+    local files; # shortlisted
+    local dirs; # shortlisted
     local d;
     local dir;
     local pfx;
@@ -598,7 +789,7 @@ function crawl()
 
     dir="$1";
     pfx="$PFX";
-    ppfx=${pfx%/*};
+    ppfx="${pfx%/*}";
 
     get_sxtimes "$dir";
 
@@ -612,15 +803,17 @@ function crawl()
     fi
     # missing stime is 0 stime
 
+
     if [ "$xtime" = "$stime" ]; then
 	if [ "$silent" != 1 ]; then
 	    info "Nothing to do: $pfx (x,s=$xtime)";
 	fi
-	if [ $PFX = . ]; then
+	if [ "$PFX" = . ]; then
 	    silent=1;
 	fi
 	return 0;
     fi
+
     silent=0
 
     # always happens in pair:
@@ -629,17 +822,33 @@ function crawl()
 
     dbg "Entering: $pfx (x=$xtime,s=$stime)";
 
+    inc_desc;
+
     local file=/tmp/xsync.$BASHPID.list;
 
-    (cd "$dir"; find . -maxdepth 1 -mindepth 1 -printf "%y '%f' %s %#m %C@\n") > $file;
+    (cd "$dir"; find . -maxdepth 1 -mindepth 1 -printf "%y:%s:%#m:%C@:=%f\n") > $file;
 
+    if [ "$PFX" = . ]; then
+	sort $file > $file.tmp;
+	mv $file.tmp $file;
+    fi
+
+    files=();
+    dirs=();
+
+    ind=0;
     while read line; do
-	eval "set $line";
+	oldIFS="$IFS";
+	IFS=":";
+	set $line;
+	IFS="$oldIFS";
 	type=$1;
-	name=$2;
-	size=$3;
-	mode=$4;
-	ctime=$5;
+	size=$2;
+	mode=$3;
+	ctime=$4;
+	name=${line#*=};
+
+	inc_entry $type;
 
 	[ "$name" = "." ] && continue;
 
@@ -653,44 +862,41 @@ function crawl()
 	    continue;
 	fi
 
-	if greater_than $stime $ctime; then
-	    dbg "Pruned $PFX/$name (s=$stime,c=$ctime)";
-	    continue;
+	if [ "$PFX" = . ]; then
+	    ind=$(($ind + 1));
+	    top_skip $INDEX "$name" $ind && continue;
 	fi
 
+	greater_than $stime $ctime && continue;
+
 	if [ "$type" = "d" ]; then
-	    if [ -z "$dirs" ]; then
-		dirs="$name";
-	    else
-		dirs="$name\n$dirs";
-	    fi
+
+	    dirs+=("$name");
+
 	else
-	    files="$name\n$files";
+	    inc_xfer_size $size;
+
+	    files+=("$name");
 	fi
 
     done < $file;
     rm -rf $file;
 
-    if [ ! -z "$dirs" ]; then
+    if [ ${#dirs[@]} -gt 0 ]; then
 	# in case directories are missing
 	# use cpio to create just the directories without contents
 	# (tar cannot do that)
-	if [ "$TAR_FROM_FUSE" = "yes" ]; then
-	    echo -e "$dirs" | (cd "$MOUNT/$PFX" && cpio --quiet --create) | \
+	array_nl "${dirs[@]}" | (cd "$SRCDIR/$PFX" && cpio --quiet --create) | \
 		SSH "cd $SLAVEMOUNT/$PFX && cpio --quiet --extract";
-	else
-	    echo -e "$dirs" | (cd "$SCANDIR/$PFX" && cpio --quiet --create) | \
-		SSH "cd $SLAVEMOUNT/$PFX && cpio --quiet --extract";
-	fi
     fi
 
-    if [ ! -z "$files" ]; then
+    if [ ${#files[@]} -gt 0 ]; then
 	## TODO check for false positives (xtime != ctime)
 	## and add a doublecheck if necessary
-	throttled_bg sync_files "$dir" "$files";
+	throttled_bg sync_files "$dir" "${files[@]}";
     fi
 
-    for d in `echo -e "$dirs"`; do
+    for d in "${dirs[@]}"; do
 	[ "$d" = "." ] && continue
 
 	PFX="$pfx/$d";
@@ -722,130 +928,6 @@ function top_skip()
 }
 
 
-function top_crawl()
-{
-    local xtime; # xtime of master
-    local stime; # xtime of slave (maintained on master's copy)
-    local type;
-    local name;
-    local ctime;
-    local files=; # shortlisted
-    local dirs=; # shortlisted
-    local d;
-    local dir;
-    local pfx;
-    local size;
-    local mode;
-    local ppfx;
-
-    dir="$1";
-    pfx="$PFX";
-    ppfx=${pfx%/*};
-
-    get_sxtimes "$dir";
-
-    xtime=$_xtime;
-    stime=$_stime;
-
-    if [ "$xtime" = "0" ]; then
-	true
-	warn "[$BASHPID] missing xtime on $pfx (returning)";
-	return;
-    fi
-    # missing stime is 0 stime
-
-    if [ "$xtime" = "$stime" ]; then
-	if [ "$silent" != 1 ]; then
-	    info "Nothing to do: $pfx (x,s=$xtime)";
-	fi
-	if [ $PFX = . ]; then
-	    silent=1;
-	fi
-	return 0;
-    fi
-    silent=0
-
-    # always happens in pair:
-    pending_set "$pfx" "$xtime";
-    [ "$pfx" != "." ] && pending_inc "$ppfx";
-
-    info "Entering: $pfx (x=$xtime,s=$stime)";
-
-    file=/tmp/xsync.$BASHPID.list;
-    (cd "$dir"; find . -maxdepth 1 -mindepth 1 -printf "%y '%f' %s %#m %C@\n" | sort) > $file;
-
-    ind=0
-    while read line; do
-	eval "set $line";
-	type=$1;
-	name=$2;
-	size=$3;
-	mode=$4;
-	ctime=$5;
-
-	ind=$(($ind + 1));
-	[ "$name" = "." ] && continue;
-
-	if [ "$name" = ".glusterfs" -a "$dir" = "$SCANDIR" ]; then
-	    # Skipping internal .glusterfs
-	    continue;
-	fi
-
-	if [ "$mode" = "0100" -a "$size" = "0" -a "$type" = "f" ]; then
-	    # Skipping linkfile
-	    continue;
-	fi
-
-	if greater_than $stime $ctime; then
-	    dbg "Pruned $PFX/$name (s=$stime,c=$ctime)";
-	    continue;
-	fi
-
-	top_skip $INDEX $name $ind && continue;
-
-	if [ "$type" = "d" ]; then
-	    if [ -z "$dirs" ]; then
-		dirs="$name";
-	    else
-		dirs="$name\n$dirs";
-	    fi
-	else
-	    files="$name\n$files";
-	fi
-
-    done < $file;
-
-    rm -f $file;
-
-    if [ ! -z "$dirs" ]; then
-	# in case directories are missing
-	# use cpio to create just the directories without contents
-	# (tar cannot do that)
-	echo -e "$dirs" | (cd "$MOUNT/$PFX" && cpio --quiet --create) | \
-	    SSH "cd $SLAVEMOUNT/$PFX && cpio --quiet --extract"
-    fi
-
-    if [ ! -z "$files" ]; then
-	## TODO check for false positives (xtime != ctime)
-	## and add a doublecheck if necessary
-	throttled_bg sync_files "$dir" "$files";
-    fi
-
-    for d in `echo -e "$dirs"`; do
-	[ "$d" = "." ] && continue
-
-	PFX="$pfx/$d";
-	crawl "$dir/$d";
-    done
-
-    pending_dec "$pfx";
-
-    reap_bg;
-
-    return 0;
-}
-
-
 function worker()
 {
     SCANDIR="$1";
@@ -854,6 +936,12 @@ function worker()
 
     info "Worker $INDEX/$BRICKS (R=$REPLICA) with monitor $MONITOR at $SCANDIR";
     trap 'info Cleaning up worker; kill $(jobs -p) 2>/dev/null' EXIT;
+
+    if [ "$TAR_FROM_FUSE" = "yes" ]; then
+	SRCDIR=$MOUNT;
+    else
+	SRCDIR=$SCANDIR;
+    fi
 
     while true; do
 	sleep 1;
@@ -864,11 +952,13 @@ function worker()
 	unset pending[*]; declare -A pending; # start fresh
 	unset BG_PIDS[*]; declare -A BG_PIDS;
 
-	top_crawl "${SCANDIR}";
+	stats_wipe;
+
+	crawl "${SCANDIR}";
 
 	while [ ${#BG_PIDS[*]} -ne 0 ]; do
 	    reap_bg;
-	    sleep 1;
+	    sleep 0.1;
 	done
 
 	if [ ${#BG_PIDS[*]} -ne 0 -o ${#pending[*]} -ne 0 ]; then
@@ -976,6 +1066,7 @@ function monitor()
 
 	for dir in ${!LOCAL_EXPORTS[*]}; do
 	    worker $dir ${LOCAL_EXPORTS[$dir]} &
+	    break;
 	    sleep 0.1
 	done
 
@@ -995,6 +1086,8 @@ function monitor()
 
 function main()
 {
+    statify;
+
     parse_cli "$@";
 
     gather_local_exports;
