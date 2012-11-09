@@ -648,7 +648,7 @@ function crawl()
 	    continue;
 	fi
 
-	if [ "$mode" = "0100" -a "$size" = "0" -a "$type" = "f" ]; then
+	if [ "$mode" = "01000" -a "$size" = "0" -a "$type" = "f" ]; then
 	    # Skipping linkfile
 	    continue;
 	fi
