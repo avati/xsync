@@ -1,14 +1,15 @@
 PACKAGE_NAME=glusterfs-xsync
-PACKAGE_VERSION=0.3
+PACKAGE_VERSION=0.4
 PACKAGE_DIR=$(PACKAGE_NAME)-$(PACKAGE_VERSION)
 
 all:
-	$(CC) -o xfind xfind.c -Wall -pthread -O0 -g
+	$(CC) -o xfind xfind.c $(CFLAGS) -Wall -pthread -O0 -g
 
 dist:
 	rm -rvf $(PACKAGE_DIR)
 	mkdir -vp $(PACKAGE_DIR)
 	install -m 0755 xsync.sh $(PACKAGE_DIR)/xsync.sh
+	install -m 0755 xsync_files.sh $(PACKAGE_DIR)/xsync_files.sh
 	install -m 0755 gsyncd $(PACKAGE_DIR)/gsyncd
 	install -m 0644 xfind.c $(PACKAGE_DIR)/xfind.c
 	install -m 0644 list.h $(PACKAGE_DIR)/list.h

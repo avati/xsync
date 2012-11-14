@@ -928,6 +928,27 @@ function top_skip()
 }
 
 
+function do_xfind()
+{
+    WORKERS=$PARALLEL_TARS;
+    XFER_CMD="$(dirname $0)/xsync_files.sh"
+
+    export REPLICA
+    export INDEX
+    export SSHKEY
+    export SLAVESOCK
+    export SRCDIR
+    export SLAVEMOUNT
+    export TAR_FROM_FUSE
+    export STATS
+    export WORKERS
+    export XFER_CMD
+
+    unset PFX;
+    $(dirname $0)/xfind $SCANDIR;
+
+}
+
 function worker()
 {
     SCANDIR="$1";
@@ -945,6 +966,12 @@ function worker()
 
     while true; do
 	sleep 1;
+
+	if [ -f $(dirname $0)/xfind ]; then
+	    do_xfind;
+	    continue;
+	fi
+
         # top level PFX _has_ to be "." for pending_{dec,err}() to work
 	# it is assumed that if ${p%/*} = $p then we have reached top
 	# of the tree.
@@ -1066,7 +1093,6 @@ function monitor()
 
 	for dir in ${!LOCAL_EXPORTS[*]}; do
 	    worker $dir ${LOCAL_EXPORTS[$dir]} &
-	    break;
 	    sleep 0.1
 	done
 

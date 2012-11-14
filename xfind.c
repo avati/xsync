@@ -25,6 +25,7 @@
 #include <assert.h>
 #include <arpa/inet.h>
 #include <linux/limits.h>
+#include <sys/wait.h>
 
 #include "list.h"
 
@@ -41,6 +42,59 @@
 #define terr(x ...) do { err("[%ld] ", pthread_self()); err(x); } while (0)
 #define tdbg(x ...) do { dbg("[%ld] ", pthread_self()); dbg(x); } while (0)
 
+
+#define DEFAULT_WORKERS 2
+
+/* ENV variables */
+int REPLICA;
+int INDEX;
+int WORKERS;
+
+#ifdef DEBUG
+#define DEFAULT_XFER_CMD "true"
+#else
+#define DEFAULT_XFER_CMD "/usr/libexec/glusterfs/xsync_files.sh"
+#endif
+
+
+char *XFER_CMD;
+
+char *BASEDIR;
+
+int
+setenvint(const char *str, int *intp)
+{
+	char *val = NULL;
+	int  i = 0;
+
+	val = getenv (str);
+	if (!val)
+		return -1;
+
+	i = atoi(val);
+
+	if (intp)
+		*intp = i;
+	return 0;
+}
+
+
+char *
+setenvstr(const char *str, char **strp)
+{
+	char *val = NULL;
+
+	val = getenv (str);
+	if (!val)
+		return NULL;
+
+	if (strp)
+		*strp = val;
+
+	return val;
+}
+
+
 #define NEW(x) x = calloc(1, sizeof(typeof(*x)))
 
 
@@ -51,14 +105,16 @@ char *stime_key; // --ditto--
 int
 get_xtime (const char *path, const char *key, struct timeval *tv)
 {
-	return 0;
-
 	unsigned int timebuf[2];
 	int          ret;
 
 	ret = lgetxattr (path, key, timebuf, sizeof(timebuf));
-	if (ret == -1 && errno != ENODATA)
-		terr ("lgetxattr(%s,%s): %s\n", path, key, strerror (errno));
+	if (ret == -1) {
+		if (errno != ENODATA)
+			terr ("lgetxattr(%s,%s): %s\n", path, key,
+			      strerror (errno));
+		return ret;
+	}
 
 	tv->tv_sec = ntohl (timebuf[0]);
 	tv->tv_usec = ntohl (timebuf[1]);
@@ -70,8 +126,6 @@ get_xtime (const char *path, const char *key, struct timeval *tv)
 int
 set_xtime (const char *path, const char *key, struct timeval *tv)
 {
-	return 0;
-
 	unsigned int timebuf[2];
 	int          ret;
 
@@ -93,6 +147,7 @@ struct dirjob {
 
 	struct dirjob      *parent;
 	struct timeval      xtime;
+	struct timeval      stime;
 	int                 ret;    /* final status of this subtree */
 	int                 refcnt; /* how many dirjobs have this as parent */
 	pthread_spinlock_t  lock;
@@ -170,7 +225,7 @@ dirjob_ret (struct dirjob *job, int err)
 			ret = dirjob_update (job);
 
 		if (ret)
-			tdbg ("Finished: %s (%d)\n", job->dirname, ret);
+			terr ("Finished: %s (%d)\n", job->dirname, ret);
 
 		parent = job->parent;
 		if (parent)
@@ -283,7 +338,19 @@ unlock:
 
 
 int
-skip_name (const char *name)
+dumbhash (const char *name)
+{
+	int h = 0;
+	const char *p = NULL;
+
+	for (p = name; *p; p++)
+		h += *p;
+
+	return h;
+}
+
+int
+skip_name (const char *dirname, const char *name)
 {
 	if (strcmp (name, ".") == 0)
 		return 1;
@@ -293,6 +360,13 @@ skip_name (const char *name)
 
 	if (strcmp (name, ".glusterfs") == 0)
 		return 1;
+
+	if (strcmp (dirname, ".") == 0)
+		/* skip even/odd entries from replicas */
+		if ((dumbhash (name) % REPLICA) != (INDEX % REPLICA)) {
+			tdbg ("Skipping ./%s\n", name);
+			return 1;
+		}
 
 	return 0;
 }
@@ -322,7 +396,6 @@ int
 xworker_crawl (struct xwork *xwork, struct dirjob *job)
 {
 	DIR            *dirp = NULL;
-	struct timeval  stime = {0, };
 	struct timeval  xtime = {0, };
 	struct timeval  ctime = {0, };
 	int             ret = -1;
@@ -337,11 +410,15 @@ xworker_crawl (struct xwork *xwork, struct dirjob *job)
 	int             ecount = 0;
 	int             esize = 0;
 	int             i = 0;
+	int             filecnt = 0;
+	int             dircnt = 0;
 	struct dirjob  *cjob = NULL;
 
 
 	plen = strlen (job->dirname) + 256 + 2;
 	path = alloca (plen);
+
+	tdbg ("Entering: %s\n", job->dirname);
 
 	ret = get_xtime (job->dirname, xtime_key, &job->xtime);
 	if (ret) {
@@ -349,12 +426,14 @@ xworker_crawl (struct xwork *xwork, struct dirjob *job)
 		goto out;
 	}
 
-	ret = get_xtime (job->dirname, stime_key, &stime);
+	ret = get_xtime (job->dirname, stime_key, &job->stime);
 	if (ret) {
 		tdbg ("stime missing on %s\n", job->dirname);
+	}
 
-		stime.tv_sec = 0;
-		stime.tv_usec = 0;
+	if (timercmp (&job->xtime, &job->stime, ==)) {
+		tdbg ("Nothing to do: %s\n", job->dirname);
+		return 0;
 	}
 
 	dirp = opendir (job->dirname);
@@ -375,7 +454,7 @@ xworker_crawl (struct xwork *xwork, struct dirjob *job)
 		if (!result) /* EOF */
 			break;
 
-		if (skip_name (result->d_name))
+		if (skip_name (job->dirname, result->d_name))
 			continue;
 
 		if (!esize) {
@@ -439,7 +518,7 @@ xworker_crawl (struct xwork *xwork, struct dirjob *job)
 		ctime.tv_sec = entries[i].xd_stbuf.st_ctime;
 		ctime.tv_usec = entries[i].xd_stbuf.st_ctim.tv_nsec / 1000;
 
-		if (timercmp (&ctime, &stime, <))
+		if (timercmp (&ctime, &job->stime, <), 0)
 			/* if ctime itself is lower than the stime,
 			   don't bother with the get_xtime */
 			continue;
@@ -448,38 +527,88 @@ xworker_crawl (struct xwork *xwork, struct dirjob *job)
 
 		ret = get_xtime (path, xtime_key, &xtime);
 		if (ret == 0) {
-			if (timercmp (&xtime, &stime, <))
+			if (timercmp (&xtime, &job->stime, <))
 				continue;
 		}
+
+		if (S_ISDIR (entries[i].xd_stbuf.st_mode))
+			dircnt++;
+		else
+			filecnt++;
 
 		entries[i].xd_skip = 0;
 	}
 
-	for (i = 0; i < ecount; i++) {
+	tdbg ("%s: filecnt=%d dircnt=%d\n", job->dirname, filecnt, dircnt);
+
+	for (i = 0; i < ecount && dircnt; i++) {
 		if (entries[i].xd_skip)
 			continue;
 
+		if (!S_ISDIR (entries[i].xd_stbuf.st_mode))
+			continue;
+
+		dircnt--;
+
 		strncpy (path + boff, entries[i].xd_name, (plen-boff));
 
-		if (S_ISDIR (entries[i].xd_stbuf.st_mode)) {
-			cjob = dirjob_new (path, job);
-			if (!cjob) {
-				err ("dirjob_new(%s): %s\n",
-				     path, strerror (errno));
-				ret = -1;
+		cjob = dirjob_new (path, job);
+		if (!cjob) {
+			err ("dirjob_new(%s): %s\n",
+			     path, strerror (errno));
+			ret = -1;
+			goto out;
+		}
+
+		if (entries[i].xd_stbuf.st_nlink == 2) {
+			/* leaf node */
+			xwork_addjob (xwork, cjob);
+		} else {
+			ret = xworker_crawl (xwork, cjob);
+			dirjob_ret (cjob, ret);
+			if (ret)
+				goto out;
+		}
+	}
+
+	if (filecnt) {
+		char *xfer_cmd = NULL;
+
+		asprintf (&xfer_cmd, "sh -c '%s %s'", XFER_CMD, job->dirname);
+		if (!xfer_cmd) {
+			terr ("%s: asprintf failed\n", job->dirname);
+			ret = -1;
+			goto out;
+		}
+
+		fp = popen (xfer_cmd, "w");
+		free (xfer_cmd);
+
+		if (!fp) {
+			terr ("%s: popen failed: %s\n", job->dirname,
+			      strerror (errno));
+			ret = -1;
+			goto out;
+		}
+	}
+
+	for (i = 0; i < ecount && filecnt; i++) {
+		if (entries[i].xd_skip)
+			continue;
+
+		if (S_ISDIR (entries[i].xd_stbuf.st_mode))
+			continue;
+
+		fprintf (fp, "%s\n", entries[i].xd_name);
+
+		filecnt--;
+		if (!filecnt) {
+			ret = pclose (fp);
+			ret = WEXITSTATUS(ret);
+			if (ret) {
+				terr ("%s: tar failed\n", job->dirname);
 				goto out;
 			}
-
-			if (entries[i].xd_stbuf.st_nlink == 2) {
-				/* leaf node */
-				xwork_addjob (xwork, cjob);
-			} else {
-				ret = xworker_crawl (xwork, cjob);
-				dirjob_ret (cjob, ret);
-				if (ret)
-					goto out;
-			}
-			continue;
 		}
 	}
 
@@ -527,7 +656,7 @@ xwork_fini (struct xwork *xwork, int stop)
 
 	for (i = 0; i < xwork->count; i++) {
 		pthread_join (xwork->threads[i], &tret);
-		out ("Thread id %ld returned %p\n", xwork->threads[i], tret);
+		tdbg ("Thread id %ld returned %p\n", xwork->threads[i], tret);
 	}
 
 	return ret;
@@ -553,8 +682,8 @@ xwork_init (struct xwork *xwork, int count)
 				      xworker, xwork);
 		if (ret)
 			break;
-		out ("Spawned worker %d thread %ld\n", i,
-		     xwork->threads[i]);
+		tdbg ("Spawned worker %d thread %ld\n", i,
+		      xwork->threads[i]);
 	}
 
 	return ret;
@@ -580,11 +709,11 @@ xfind (const char *basedir)
 		return -1;
 	}
 
-	out ("Working directory: %s\n", cwd);
+	tout ("Working directory: %s\n", cwd);
 	free (cwd);
 
 	memset (&xwork, 0, sizeof (xwork));
-	ret = xwork_init (&xwork, 0);
+	ret = xwork_init (&xwork, WORKERS);
 	if (ret == 0)
 		xworker (&xwork);
 
@@ -621,6 +750,7 @@ parse_arg (int argc, char *argv[])
 		return NULL;
 	}
 
+	// Ugly, no time
 	asprintf (&xtime_key, "trusted.glusterfs."
 		  "%02x%02x%02x%02x" "-"
 		  "%02x%02x" "-" "%02x%02x" "-" "%02x%02x" "-"
@@ -630,7 +760,7 @@ parse_arg (int argc, char *argv[])
 		  volume_id[8], volume_id[9], volume_id[10], volume_id[11],
 		  volume_id[12], volume_id[13], volume_id[14], volume_id[15]);
 
-	out ("Xtime key = '%s'\n", xtime_key);
+	tdbg ("Xtime key = '%s'\n", xtime_key);
 	asprintf (&stime_key, "trusted.glusterfs."
 		  "%02x%02x%02x%02x" "-"
 		  "%02x%02x" "-" "%02x%02x" "-" "%02x%02x" "-"
@@ -645,6 +775,33 @@ parse_arg (int argc, char *argv[])
 
 
 int
+parse_env (void)
+{
+	if (setenvint ("REPLICA", &REPLICA) == -1) {
+		tout ("Defaulting REPLICA to 1\n");
+		REPLICA = 1;
+	}
+
+	if (setenvint ("INDEX", &INDEX) == -1) {
+		tout ("Defaulting INDEX to 1\n");
+		INDEX = 1;
+	}
+
+	if (setenvint ("WORKERS", &WORKERS) == -1) {
+		tout ("Defaulting WORKERS to %d\n", DEFAULT_WORKERS);
+		WORKERS = DEFAULT_WORKERS;
+	}
+
+	if (setenvstr ("XFER_CMD", &XFER_CMD) == NULL) {
+		tout ("Defaulting XFER_CMD to " DEFAULT_XFER_CMD "\n");
+		XFER_CMD = DEFAULT_XFER_CMD;
+	}
+
+	return 0;
+}
+
+
+int
 main (int argc, char *argv[])
 {
 	char *basedir = NULL;
@@ -652,6 +809,10 @@ main (int argc, char *argv[])
 	basedir = parse_arg (argc, argv);
 	if (!basedir)
 		return 1;
+
+	BASEDIR = basedir;
+
+	parse_env ();
 
 	xfind (basedir);
 
