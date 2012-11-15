@@ -24,6 +24,7 @@ mkdir -p $RPM_BUILD_ROOT/usr/libexec/glusterfs
 install -m755 gsyncd $RPM_BUILD_ROOT/usr/libexec/glusterfs/gsyncd
 install -m755 xsync.sh $RPM_BUILD_ROOT/usr/libexec/glusterfs/xsync
 install -m755 xsync_files.sh $RPM_BUILD_ROOT/usr/libexec/glusterfs/xsync_files.sh
+install -m755 sync_stime.sh $RPM_BUILD_ROOT/usr/libexec/glusterfs/sync_stime.sh
 install -m755 xfind $RPM_BUILD_ROOT/usr/libexec/glusterfs/xfind
 
 %clean
@@ -34,6 +35,7 @@ rm -rf $RPM_BUILD_ROOT
 %doc README.md
 /usr/libexec/glusterfs/xsync
 /usr/libexec/glusterfs/xsync_files.sh
+/usr/libexec/glusterfs/sync_stime.sh
 /usr/libexec/glusterfs/xfind
 
 %package gsyncd

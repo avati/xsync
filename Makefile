@@ -10,6 +10,7 @@ dist:
 	mkdir -vp $(PACKAGE_DIR)
 	install -m 0755 xsync.sh $(PACKAGE_DIR)/xsync.sh
 	install -m 0755 xsync_files.sh $(PACKAGE_DIR)/xsync_files.sh
+	install -m 0755 xsync_files.sh $(PACKAGE_DIR)/sync_stime.sh
 	install -m 0755 gsyncd $(PACKAGE_DIR)/gsyncd
 	install -m 0644 xfind.c $(PACKAGE_DIR)/xfind.c
 	install -m 0644 list.h $(PACKAGE_DIR)/list.h
