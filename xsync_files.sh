@@ -2,14 +2,14 @@
 
 function SSH()
 {
-    if [ -z "$SHARE_SSH" ]; then
+    if [ ! -z "$SHARE_SSH" ]; then
 	ssh -qi $SSHKEY \
             -oPasswordAuthentication=no \
             -oStrictHostKeyChecking=no \
 	    -oControlMaster=auto \
             -S $SLAVESOCK IDLER.IS.DEAD "$@";
     else
-	ssh -qi $SSHKEY
+	ssh -qi $SSHKEY \
             -oPasswordAuthentication=no \
             -oStrictHostKeyChecking=no \
 		"$SLAVEHOST" "$@";
