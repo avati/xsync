@@ -40,6 +40,8 @@ REPLICA=1
 
 #DEBUG=1    # set to 1 to enable debugging
 #STATS=1    # set to 1 to enable statistics
+#XFER_XATTR=1 # set to 1 to transfer XATTR
+#SHARE_SSH=1 # set to 1 to share SSH sessions
 
 shopt -s expand_aliases;
 
@@ -939,11 +941,14 @@ function do_xfind()
     export SLAVESOCK
     export SRCDIR
     export SLAVEMOUNT
+    export SLAVEHOST
     export TAR_FROM_FUSE
     export STATS
     export DEBUG
     export WORKERS
     export XFER_CMD
+    export XFER_XATTR
+    export SHARE_SSH
 
     unset PFX;
     $(dirname $0)/xfind $SCANDIR;
@@ -1006,7 +1011,7 @@ function idler()
 function do_mount() {
 v=\$1;
 d=\$(mktemp -d 2>/dev/null);
-glusterfs -s localhost --volfile-id \$v --client-pid=-1 -l /var/log/glusterfs/geo-replication-slaves/slave.log \$d;
+glusterfs -s localhost --xlator-option="*dht.lookup-unhashed=off" --volfile-id \$v --client-pid=-1 -l /var/log/glusterfs/geo-replication-slaves/slave.log \$d;
 cd \$d;
 umount -l \$d;
 rmdir \$d;
