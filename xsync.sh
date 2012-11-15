@@ -235,7 +235,7 @@ function mount_client()
 
     [ -d "$T" ] || fatal "$T: not a directory";
 
-    glusterfs -s localhost --volfile-id $MASTER --client-pid=-1 $T;
+    glusterfs -s localhost --volfile-id $MASTER --client-pid=-1 $T --attribute-timeout=10 --entry-timeout=10;
 
     i=$(stat -c '%i' $T);
 
@@ -1014,7 +1014,7 @@ function idler()
 function do_mount() {
 v=\$1;
 d=\$(mktemp -d 2>/dev/null);
-glusterfs -s localhost --xlator-option="*dht.lookup-unhashed=off" --volfile-id \$v --client-pid=-1 -l /var/log/glusterfs/geo-replication-slaves/slave.log \$d;
+glusterfs -s localhost --xlator-option="*dht.lookup-unhashed=off" --volfile-id \$v --client-pid=-1 --attribute-timeout=10 --entry-timeout=10 -l /var/log/glusterfs/geo-replication-slaves/slave.log \$d;
 cd \$d;
 umount -l \$d;
 rmdir \$d;
