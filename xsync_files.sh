@@ -26,10 +26,10 @@ function sync_files()
     fi
 
     if [ -z "$DUMMY_UNTAR" ]; then
-	tar $xatt -b 128 -C "$SRCDIR" -c --files-from=- | \
-	    SSH "tar -b 128 -C $SLAVEMOUNT -x";
+	tar $xatt -C "$SRCDIR" -c --files-from=- | \
+	    SSH "tar -C $SLAVEMOUNT -x";
     else
-	tar $xatt -b 128 -C "$SRCDIR" -c --files-from=- | \
+	tar $xatt -C "$SRCDIR" -c --files-from=- | \
 	    SSH "cat >/dev/null";
     fi
 }
