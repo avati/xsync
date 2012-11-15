@@ -615,6 +615,8 @@ xworker_do_crawl (struct xwork *xwork, struct dirjob *job)
 	int             esize = 0;
 	int             i = 0;
 	struct dirjob  *cjob = NULL;
+	int             filecnt = 0;
+	int             dircnt = 0;
 
 
 	plen = strlen (job->dirname) + 256 + 2;
@@ -713,9 +715,9 @@ xworker_do_crawl (struct xwork *xwork, struct dirjob *job)
 		}
 
 		if (S_ISDIR (entry->xd_stbuf.st_mode))
-			BUMP(encountered_dirs);
+			dircnt++;
 		else
-			BUMP(encountered_files);
+			filecnt++;
 
 		if (skip_mode (&entry->xd_stbuf))
 			continue;
@@ -747,6 +749,9 @@ xworker_do_crawl (struct xwork *xwork, struct dirjob *job)
 			BUMP(shortlist_files);
 		}
 	}
+
+	INC(encountered_dirs, dircnt);
+	INC(encountered_files, filecnt);
 
 	if (XFER_MODE == -1)
 		/* reset the old stime back in dirjob_update() */
