@@ -27,7 +27,7 @@ MOUNT=            # /proc/$MONITOR/cwd
 TAR_FROM_FUSE=yes  # tar directly from backend or from FUSE mount?
 
 HEARTBEAT_INTERVAL=30  # between idler on salve and master
-PARALLEL_TARS=3   # maximum number of parallel transfers
+PARALLEL_TARS=${PARALLEL_TARS:-3}   # maximum number of parallel transfers
 
 PIDFILE=/dev/null  # will get set in parse_cli
 LOGFILE=/dev/stderr # will get set in parse_cli
@@ -38,8 +38,8 @@ SRCDIR=            # set to either MOUNT or SCANDIR based on TAR_FROM_FUSE
 
 REPLICA=1
 
-DEBUG=${DEBUG:-0}    # set to 1 to enable debugging
-STATS=${STATS:-0}    # set to 1 to enable statistics
+#DEBUG=1    # set to 1 to enable debugging
+#STATS=1    # set to 1 to enable statistics
 
 shopt -s expand_aliases;
 
@@ -83,7 +83,7 @@ function __info()
 
 function __dbg()
 {
-    [ $DEBUG -eq 0 ] && return;
+    [ "$DEBUG" = 0 ] && return;
 
     msg DEBUG "$@";
 }
@@ -755,7 +755,7 @@ function stats_wipe()
 function do_statify()
 {
     while [ $# -gt 0 ]; do
-	if [ $STATS = 0 ]; then
+	if [ "$STATS" = 0 ]; then
 	    eval "unset -f $1";
 	    eval "function $1() { true; }";
 	fi
@@ -941,6 +941,7 @@ function do_xfind()
     export SLAVEMOUNT
     export TAR_FROM_FUSE
     export STATS
+    export DEBUG
     export WORKERS
     export XFER_CMD
 
