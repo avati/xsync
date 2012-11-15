@@ -550,7 +550,6 @@ function pending_done()
             # no changes happened while we were crawling
 	    dbg "Completed: $pfx ($status)";
 
-	    set_stime "${SCANDIR}/$pfx" "$2";
 	else
 	    info "Failed: $pfx";
 	fi
