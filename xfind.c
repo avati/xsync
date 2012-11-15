@@ -102,8 +102,10 @@ stats_dump(int force)
 
 		timersub(&now, &stats_interval.start, &idiff);
 
-		if (idiff.tv_sec >= 5 || force)
-			dump = 1;
+		if (idiff.tv_sec < 5 && !force)
+			goto unlock;
+
+		dump = 1;
 
 		interval = stats_interval;
 		total = stats_total;
