@@ -951,6 +951,7 @@ function do_xfind()
     export XFER_XATTR
     export SHARE_SSH
     export MB_PER_TAR
+    export DUMMY_UNTAR
 
     unset PFX;
     $(dirname $0)/xfind $SCANDIR;
