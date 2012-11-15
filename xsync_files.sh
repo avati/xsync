@@ -18,10 +18,8 @@ function sync_files()
         xatt=;
     fi
 
-    tar $xatt -b 128 -C "$SRCDIR/$PFX" -c --files-from=- | \
-	SSH "mkdir -p $SLAVEMOUNT/$PFX && tar -b 128 -C $SLAVEMOUNT/$PFX -x";
+    tar $xatt -b 128 -C "$SRCDIR" -c --files-from=- | \
+	SSH "tar -b 128 -C $SLAVEMOUNT -x";
 }
-
-PFX="$1";
 
 sync_files;

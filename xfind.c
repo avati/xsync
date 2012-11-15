@@ -8,6 +8,13 @@
   cases as published by the Free Software Foundation.
 */
 
+
+/*
+  - tar worker threads
+  - XFER_MODE=all|none
+  - stats
+*/
+
 #define _GNU_SOURCE
 
 #include <stdio.h>
@@ -33,29 +40,36 @@
 
 #define err(x ...) fprintf(stderr, x);
 #define out(x ...) fprintf(stdout, x);
-#ifdef DEBUG
-#define dbg(x ...) fprintf(stdout, x);
-#else
-#define dbg(x ...)
-#endif
+#define dbg(x ...) do { if (DEBUG) fprintf(stdout, x); } while (0)
 #define tout(x ...) do { out("[%ld] ", pthread_self()); out(x); } while (0)
 #define terr(x ...) do { err("[%ld] ", pthread_self()); err(x); } while (0)
 #define tdbg(x ...) do { dbg("[%ld] ", pthread_self()); dbg(x); } while (0)
 
 
+struct stats {
+	int  encountered_files;
+	int  encountered_dirs;
+	int  shortlist_files;
+	int  shortlist_dirs;
+	int  xfered_files;
+	int  xfered_bytes;
+	int  scanned_dirs;
+};
+
+
 #define DEFAULT_WORKERS 2
 
+int XFER_MODE; /* 0=default -1=none 1=all */
+
 /* ENV variables */
+int DEBUG;
+int STATS;
+
 int REPLICA;
 int INDEX;
 int WORKERS;
 
-#ifdef DEBUG
-#define DEFAULT_XFER_CMD "true"
-#else
-#define DEFAULT_XFER_CMD "/usr/libexec/glusterfs/xsync_files.sh"
-#endif
-
+#define DEFAULT_XFER_CMD "false"
 
 char *XFER_CMD;
 
@@ -150,17 +164,26 @@ struct dirjob {
 	struct timeval      stime;
 	int                 ret;    /* final status of this subtree */
 	int                 refcnt; /* how many dirjobs have this as parent */
+
+	struct xdirent     *entries;
+	struct list_head    files;  /* xdirents of shortlisted files */
+	struct list_head    dirs;   /* xdirents of shortlisted dirs */
+
 	pthread_spinlock_t  lock;
 };
 
 
 struct xwork {
-	pthread_t        threads[THREAD_MAX];
+	pthread_t        cthreads[THREAD_MAX]; /* crawler threads */
+	pthread_t        xthreads[THREAD_MAX]; /* xfer threads */
 	int              count;
 	int              idle;
 	int              stop;
 
-	struct dirjob    jobs;
+	struct dirjob    crawl;
+	struct dirjob    xfer;
+
+	struct dirjob   *rootjob; /* to verify completion in xwork_fini() */
 
 	pthread_mutex_t  mutex;
 	pthread_cond_t   cond;
@@ -187,6 +210,8 @@ dirjob_free (struct dirjob *job)
 
 	pthread_spin_destroy (&job->lock);
 	free (job->dirname);
+	if (job->entries)
+		free (job->entries);
 	free (job);
 }
 
@@ -225,7 +250,9 @@ dirjob_ret (struct dirjob *job, int err)
 			ret = dirjob_update (job);
 
 		if (ret)
-			terr ("Finished: %s (%d)\n", job->dirname, ret);
+			terr ("Failed: %s (%d)\n", job->dirname, ret);
+		else
+			tout ("Finished: %s\n", job->dirname);
 
 		parent = job->parent;
 		if (parent)
@@ -255,6 +282,8 @@ dirjob_new (const char *dir, struct dirjob *parent)
 	}
 
 	INIT_LIST_HEAD(&job->list);
+	INIT_LIST_HEAD(&job->files);
+	INIT_LIST_HEAD(&job->dirs);
 	pthread_spin_init (&job->lock, PTHREAD_PROCESS_PRIVATE);
 	job->ret = 0;
 
@@ -268,12 +297,26 @@ dirjob_new (const char *dir, struct dirjob *parent)
 
 
 void
-xwork_addjob (struct xwork *xwork, struct dirjob *job)
+xwork_addcrawl (struct xwork *xwork, struct dirjob *job)
 {
 	pthread_mutex_lock (&xwork->mutex);
 	{
-		list_add_tail (&job->list, &xwork->jobs.list);
-		pthread_cond_signal (&xwork->cond);
+		list_add_tail (&job->list, &xwork->crawl.list);
+		pthread_cond_broadcast (&xwork->cond);
+	}
+	pthread_mutex_unlock (&xwork->mutex);
+
+	return;
+}
+
+
+void
+xwork_addxfer (struct xwork *xwork, struct dirjob *job)
+{
+	pthread_mutex_lock (&xwork->mutex);
+	{
+		list_add_tail (&job->list, &xwork->xfer.list);
+		pthread_cond_broadcast (&xwork->cond);
 	}
 	pthread_mutex_unlock (&xwork->mutex);
 
@@ -289,48 +332,56 @@ xwork_add (struct xwork *xwork, const char *dir, struct dirjob *parent)
 	if (!job)
 		return -1;
 
-	xwork_addjob (xwork, job);
+	xwork_addcrawl (xwork, job);
 
 	return 0;
 }
 
 
 struct dirjob *
-xwork_pick (struct xwork *xwork)
+xwork_pick (struct xwork *xwork, int crawljob, int block)
 {
 	struct dirjob *job = NULL;
+	struct list_head *head = NULL;
+
+	if (crawljob)
+		head = &xwork->crawl.list;
+	else
+		head = &xwork->xfer.list;
 
 	pthread_mutex_lock (&xwork->mutex);
 	{
 		for (;;) {
 			if (xwork->stop)
-				goto unlock;
+				break;
 
-			if (list_empty (&xwork->jobs.list)) {
-				if (xwork->count == xwork->idle) {
-					/* no outstanding jobs, and no
-					   active workers
-					*/
-					tdbg ("Jobless. Terminating\n");
-					xwork->stop = 1;
-					pthread_cond_broadcast (&xwork->cond);
-					goto unlock;
-				}
-
-				xwork->idle++;
-				pthread_cond_wait (&xwork->cond, &xwork->mutex);
-				xwork->idle--;
-				continue;
+			if (!list_empty (head)) {
+				job = list_entry (head->next, typeof(*job),
+						  list);
+				list_del_init (&job->list);
+				break;
 			}
 
-			job = list_entry (xwork->jobs.list.next,
-					  typeof(*job), list);
-			list_del_init (&job->list);
+			if (((xwork->count * 2) == xwork->idle) &&
+			    list_empty (&xwork->crawl.list) &&
+			    list_empty (&xwork->xfer.list)) {
+				/* no outstanding jobs, and no
+				   active workers
+				*/
+				tdbg ("Jobless. Terminating\n");
+				xwork->stop = 1;
+				pthread_cond_broadcast (&xwork->cond);
+				break;
+			}
 
-			break;
+			if (!block)
+				break;
+
+			xwork->idle++;
+			pthread_cond_wait (&xwork->cond, &xwork->mutex);
+			xwork->idle--;
 		}
 	}
-unlock:
 	pthread_mutex_unlock (&xwork->mutex);
 
 	return job;
@@ -385,15 +436,58 @@ skip_mode (struct stat *stat)
 
 
 struct xdirent {
-	int            xd_skip;
-	ino_t          xd_ino;
-	struct stat    xd_stbuf;
-	char           xd_name[NAME_MAX+1];
+	struct list_head list;
+	ino_t            xd_ino;
+	struct stat      xd_stbuf;
+	char             xd_name[NAME_MAX+1];
 };
 
 
 int
-xworker_crawl (struct xwork *xwork, struct dirjob *job)
+xworker_do_xfer (struct xwork *xwork, struct list_head *jobs)
+{
+	FILE           *fp = NULL;
+	char           *xfer_cmd = NULL;
+	int             ret = -1;
+	struct dirjob  *job = NULL;
+	struct xdirent *entry = NULL;
+
+	asprintf (&xfer_cmd, "sh -c '%s'", XFER_CMD);
+	if (!xfer_cmd) {
+		terr ("%s: asprintf failed\n", job->dirname);
+		return -1;
+	}
+
+	fp = popen (xfer_cmd, "w");
+	free (xfer_cmd);
+
+	if (!fp) {
+		terr ("%s: popen failed: %s\n", job->dirname,
+		      strerror (errno));
+		return -1;
+	}
+
+	list_for_each_entry (job, jobs, list) {
+		list_for_each_entry (entry, &job->files, list) {
+			fprintf (fp, "%s/%s\n", job->dirname,
+				 entry->xd_name);
+		}
+	}
+
+	ret = pclose (fp);
+	ret = WEXITSTATUS(ret);
+	if (ret) {
+		list_for_each_entry (job, jobs, list)
+			break;
+		terr ("%s: xfer failed\n", job->dirname);
+	}
+
+	return ret;
+}
+
+
+int
+xworker_do_crawl (struct xwork *xwork, struct dirjob *job)
 {
 	DIR            *dirp = NULL;
 	struct timeval  xtime = {0, };
@@ -404,8 +498,8 @@ xworker_crawl (struct xwork *xwork, struct dirjob *job)
 	struct dirent  *result;
 	char            dbuf[512];
 	char           *path = NULL;
-	FILE           *fp = NULL;
 	struct xdirent *entries = NULL;
+	struct xdirent *entry = NULL;
 	struct xdirent *rentries = NULL;
 	int             ecount = 0;
 	int             esize = 0;
@@ -431,7 +525,7 @@ xworker_crawl (struct xwork *xwork, struct dirjob *job)
 		tdbg ("stime missing on %s\n", job->dirname);
 	}
 
-	if (timercmp (&job->xtime, &job->stime, ==)) {
+	if (!XFER_MODE && timercmp (&job->xtime, &job->stime, ==)) {
 		tdbg ("Nothing to do: %s\n", job->dirname);
 		return 0;
 	}
@@ -454,6 +548,9 @@ xworker_crawl (struct xwork *xwork, struct dirjob *job)
 		if (!result) /* EOF */
 			break;
 
+		if (result->d_ino == 0)
+			continue;
+
 		if (skip_name (job->dirname, result->d_name))
 			continue;
 
@@ -464,6 +561,7 @@ xworker_crawl (struct xwork *xwork, struct dirjob *job)
 				err ("calloc failed\n");
 				goto out;
 			}
+			job->entries = entries;
 		} else if (esize == ecount) {
 			esize += 1024;
 			rentries = realloc (entries, esize * sizeof (*entries));
@@ -472,12 +570,14 @@ xworker_crawl (struct xwork *xwork, struct dirjob *job)
 				goto out;
 			}
 			entries = rentries;
+			job->entries = entries;
 		}
 
-		entries[ecount].xd_ino = result->d_ino;
-		strncpy (entries[ecount].xd_name, result->d_name, NAME_MAX);
-		/* only selectively pick entries. skip by default */
-		entries[ecount].xd_skip = 1;
+		entry = &entries[ecount];
+		entry->xd_ino = result->d_ino;
+		strncpy (entry->xd_name, result->d_name, NAME_MAX);
+		INIT_LIST_HEAD (&entry->list);
+
 		ecount++;
 	}
 
@@ -491,66 +591,63 @@ xworker_crawl (struct xwork *xwork, struct dirjob *job)
 
 	qsort (entries, ecount, sizeof (*entries), xd_cmp);
 
-	for (i = 0; i < ecount; i++) {
-		if (entries[i].xd_ino == 0)
-			continue;
+	boff = sprintf (path, "%s/", job->dirname);
 
-		ret = fstatat (dirfd (dirp), entries[i].xd_name,
-			       &entries[i].xd_stbuf,
+	for (i = 0; i < ecount; i++) {
+		entry = &entries[i];
+		ret = fstatat (dirfd (dirp), entry->xd_name,
+			       &entry->xd_stbuf,
 			       AT_SYMLINK_NOFOLLOW);
 		if (ret) {
-			terr ("lstat(%s): %s\n", path, strerror (errno));
+			terr ("fstatat(%s): %s\n", path, strerror (errno));
 			closedir (dirp);
 			return -1;
 		}
 
-	}
-
-	boff = sprintf (path, "%s/", job->dirname);
-
-	for (i = 0; i < ecount; i++) {
-		if (entries[i].xd_ino == 0)
+		if (skip_mode (&entry->xd_stbuf))
 			continue;
 
-		if (skip_mode (&entries[i].xd_stbuf))
-			continue;
+		ctime.tv_sec = entry->xd_stbuf.st_ctime;
+		ctime.tv_usec = entry->xd_stbuf.st_ctim.tv_nsec / 1000;
 
-		ctime.tv_sec = entries[i].xd_stbuf.st_ctime;
-		ctime.tv_usec = entries[i].xd_stbuf.st_ctim.tv_nsec / 1000;
-
-		if (timercmp (&ctime, &job->stime, <), 0)
+		if (!XFER_MODE && timercmp (&ctime, &job->stime, <))
 			/* if ctime itself is lower than the stime,
 			   don't bother with the get_xtime */
 			continue;
 
-		strncpy (path + boff, entries[i].xd_name, (plen-boff));
+		strncpy (path + boff, entry->xd_name, (plen-boff));
 
 		ret = get_xtime (path, xtime_key, &xtime);
 		if (ret == 0) {
-			if (timercmp (&xtime, &job->stime, <))
+			if (!XFER_MODE && timercmp (&xtime, &job->stime, <))
 				continue;
 		}
 
-		if (S_ISDIR (entries[i].xd_stbuf.st_mode))
+		if (S_ISDIR (entry->xd_stbuf.st_mode)) {
+			list_add_tail (&entry->list, &job->dirs);
 			dircnt++;
-		else
-			filecnt++;
+		} else {
+			if (XFER_MODE == -1)
+				continue;
 
-		entries[i].xd_skip = 0;
+			list_add_tail (&entry->list, &job->files);
+			filecnt++;
+		}
 	}
+
+	if (XFER_MODE == -1)
+		/* reset the old stime back in dirjob_update() */
+		job->xtime = job->stime;
 
 	tdbg ("%s: filecnt=%d dircnt=%d\n", job->dirname, filecnt, dircnt);
 
-	for (i = 0; i < ecount && dircnt; i++) {
-		if (entries[i].xd_skip)
-			continue;
+	if (!list_empty (&job->files)) {
+		dirjob_ref (job);
+		xwork_addxfer (xwork, job);
+	}
 
-		if (!S_ISDIR (entries[i].xd_stbuf.st_mode))
-			continue;
-
-		dircnt--;
-
-		strncpy (path + boff, entries[i].xd_name, (plen-boff));
+	list_for_each_entry (entry, &job->dirs, list) {
+		strncpy (path + boff, entry->xd_name, (plen-boff));
 
 		cjob = dirjob_new (path, job);
 		if (!cjob) {
@@ -560,55 +657,14 @@ xworker_crawl (struct xwork *xwork, struct dirjob *job)
 			goto out;
 		}
 
-		if (entries[i].xd_stbuf.st_nlink == 2) {
+		if (entry->xd_stbuf.st_nlink == 2) {
 			/* leaf node */
-			xwork_addjob (xwork, cjob);
+			xwork_addcrawl (xwork, cjob);
 		} else {
-			ret = xworker_crawl (xwork, cjob);
+			ret = xworker_do_crawl (xwork, cjob);
 			dirjob_ret (cjob, ret);
 			if (ret)
 				goto out;
-		}
-	}
-
-	if (filecnt) {
-		char *xfer_cmd = NULL;
-
-		asprintf (&xfer_cmd, "sh -c '%s %s'", XFER_CMD, job->dirname);
-		if (!xfer_cmd) {
-			terr ("%s: asprintf failed\n", job->dirname);
-			ret = -1;
-			goto out;
-		}
-
-		fp = popen (xfer_cmd, "w");
-		free (xfer_cmd);
-
-		if (!fp) {
-			terr ("%s: popen failed: %s\n", job->dirname,
-			      strerror (errno));
-			ret = -1;
-			goto out;
-		}
-	}
-
-	for (i = 0; i < ecount && filecnt; i++) {
-		if (entries[i].xd_skip)
-			continue;
-
-		if (S_ISDIR (entries[i].xd_stbuf.st_mode))
-			continue;
-
-		fprintf (fp, "%s\n", entries[i].xd_name);
-
-		filecnt--;
-		if (!filecnt) {
-			ret = pclose (fp);
-			ret = WEXITSTATUS(ret);
-			if (ret) {
-				terr ("%s: tar failed\n", job->dirname);
-				goto out;
-			}
 		}
 	}
 
@@ -616,24 +672,50 @@ xworker_crawl (struct xwork *xwork, struct dirjob *job)
 out:
 	if (dirp)
 		closedir (dirp);
-	if (entries)
-		free (entries);
 
 	return ret;
 }
 
 
 void *
-xworker (void *data)
+xworker_crawl (void *data)
 {
 	struct xwork *xwork = data;
 	struct dirjob *job = NULL;
 	int            ret = -1;
 
-	while ((job = xwork_pick (xwork))) {
+	while ((job = xwork_pick (xwork, 1, 1))) {
 		tdbg ("Picked: %s\n", job->dirname);
-		ret = xworker_crawl (xwork, job);
+		ret = xworker_do_crawl (xwork, job);
 		dirjob_ret (job, ret);
+	}
+
+	return NULL;
+}
+
+
+void *
+xworker_xfer (void *data)
+{
+	struct xwork     *xwork = data;
+	struct dirjob    *job = NULL;
+	struct dirjob    *tmp = NULL;
+	int               ret = -1;
+	struct list_head  jobs;
+
+	while ((job = xwork_pick (xwork, 0, 1))) {
+		INIT_LIST_HEAD (&jobs);
+		list_add_tail (&job->list, &jobs);
+
+		while ((job = xwork_pick (xwork, 0, 0)))
+			list_add_tail (&job->list, &jobs);
+
+		ret = xworker_do_xfer (xwork, &jobs);
+
+		list_for_each_entry_safe (job, tmp, &jobs, list) {
+			list_del_init (&job->list);
+			dirjob_ret (job, ret);
+		}
 	}
 
 	return NULL;
@@ -655,8 +737,18 @@ xwork_fini (struct xwork *xwork, int stop)
 	pthread_mutex_unlock (&xwork->mutex);
 
 	for (i = 0; i < xwork->count; i++) {
-		pthread_join (xwork->threads[i], &tret);
-		tdbg ("Thread id %ld returned %p\n", xwork->threads[i], tret);
+		pthread_join (xwork->cthreads[i], &tret);
+		tdbg ("CThread id %ld returned %p\n",
+		      xwork->cthreads[i], tret);
+		pthread_join (xwork->xthreads[i], &tret);
+		tdbg ("XThread id %ld returned %p\n",
+		      xwork->xthreads[i], tret);
+	}
+
+	if (DEBUG) {
+		assert (xwork->rootjob->refcnt == 1);
+
+		dirjob_ret (xwork->rootjob, 0);
 	}
 
 	return ret;
@@ -668,22 +760,35 @@ xwork_init (struct xwork *xwork, int count)
 {
 	int  i = 0;
 	int  ret = 0;
+	struct dirjob *rootjob = NULL;
 
 	pthread_mutex_init (&xwork->mutex, NULL);
 	pthread_cond_init (&xwork->cond, NULL);
 
-	INIT_LIST_HEAD (&xwork->jobs.list);
+	INIT_LIST_HEAD (&xwork->crawl.list);
+	INIT_LIST_HEAD (&xwork->xfer.list);
 
-	xwork_add (xwork, ".", NULL);
+	rootjob = dirjob_new (".", NULL);
+	if (DEBUG)
+		xwork->rootjob = dirjob_ref (rootjob);
+
+	xwork_addcrawl (xwork, rootjob);
 
 	xwork->count = count;
 	for (i = 0; i < count; i++) {
-		ret = pthread_create (&xwork->threads[i], NULL,
-				      xworker, xwork);
+		ret = pthread_create (&xwork->cthreads[i], NULL,
+				      xworker_crawl, xwork);
 		if (ret)
 			break;
-		tdbg ("Spawned worker %d thread %ld\n", i,
-		      xwork->threads[i]);
+		tdbg ("Spawned crawler %d thread %ld\n", i,
+		      xwork->cthreads[i]);
+
+		ret = pthread_create (&xwork->xthreads[i], NULL,
+				      xworker_xfer, xwork);
+		if (ret)
+			break;
+		tdbg ("Spawned xfer %d thread %ld\n", i,
+		      xwork->xthreads[i]);
 	}
 
 	return ret;
@@ -715,7 +820,7 @@ xfind (const char *basedir)
 	memset (&xwork, 0, sizeof (xwork));
 	ret = xwork_init (&xwork, WORKERS);
 	if (ret == 0)
-		xworker (&xwork);
+		xworker_crawl (&xwork);
 
 	ret = xwork_fini (&xwork, ret);
 
@@ -777,6 +882,8 @@ parse_arg (int argc, char *argv[])
 int
 parse_env (void)
 {
+	char *xfer_mode_str = NULL;
+
 	if (setenvint ("REPLICA", &REPLICA) == -1) {
 		tout ("Defaulting REPLICA to 1\n");
 		REPLICA = 1;
@@ -795,6 +902,23 @@ parse_env (void)
 	if (setenvstr ("XFER_CMD", &XFER_CMD) == NULL) {
 		tout ("Defaulting XFER_CMD to " DEFAULT_XFER_CMD "\n");
 		XFER_CMD = DEFAULT_XFER_CMD;
+	}
+
+	if (getenv ("DEBUG"))
+		DEBUG = 1;
+
+	if (getenv ("STATS"))
+		STATS = 1;
+
+	XFER_MODE = 0;
+
+	xfer_mode_str = getenv ("XFER_MODE");
+	if (xfer_mode_str) {
+		if (strcasecmp (xfer_mode_str, "ALL") == 0)
+			XFER_MODE = 1;
+
+		if (strcasecmp (xfer_mode_str, "NONE") == 0)
+			XFER_MODE = -1;
 	}
 
 	return 0;
