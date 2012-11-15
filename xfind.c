@@ -10,8 +10,6 @@
 
 
 /*
-  - tar worker threads
-  - XFER_MODE=all|none
   - stats
 */
 
@@ -47,15 +45,118 @@
 
 
 struct stats {
-	int  encountered_files;
-	int  encountered_dirs;
-	int  shortlist_files;
-	int  shortlist_dirs;
-	int  xfered_files;
-	int  xfered_bytes;
-	int  scanned_dirs;
-};
+	struct timeval start;
+	int  cnt_encountered_files;
+	int  cnt_encountered_dirs;
+	int  cnt_encountered_leafs;
+	int  cnt_shortlist_files;
+	int  cnt_shortlist_dirs;
 
+	int  cnt_scanned_dirs;
+
+	int  cnt_xfered_files;
+	long long int cnt_xfered_bytes;
+	int  cnt_xfer_execs;
+};
+int stats_bumped;
+
+pthread_spinlock_t stats_lock;
+struct stats stats_interval;
+struct stats stats_total;
+int STATS;
+
+#define INC(name, val) do {				\
+	if (!STATS)				        \
+		break;					\
+	pthread_spin_lock(&stats_lock);			\
+	{						\
+		stats_interval.cnt_##name += val;	\
+		stats_total.cnt_##name += val;		\
+		stats_bumped = 1;			\
+	}						\
+	pthread_spin_unlock(&stats_lock);		\
+	} while (0)
+
+void
+stats_dump(int force)
+{
+	struct timeval now;
+	struct timeval idiff;
+	struct timeval tdiff;
+	struct stats interval;
+	struct stats total;
+	int          dump = 0;
+
+	if (!STATS)
+		return;
+
+	if (!stats_bumped)
+		return;
+
+	gettimeofday (&now, 0);
+
+	pthread_spin_lock(&stats_lock);
+	{
+		if (!stats_bumped)
+			goto unlock;
+
+		timersub(&now, &stats_interval.start, &idiff);
+
+		if (idiff.tv_sec >= 5 || force)
+			dump = 1;
+
+		interval = stats_interval;
+		total = stats_total;
+		memset (&stats_interval, 0, sizeof(struct stats));
+		stats_interval.start = now;
+	}
+unlock:
+	pthread_spin_unlock(&stats_lock);
+
+	if (!dump)
+		return;
+/*
+	struct timeval start;
+	int  cnt_encountered_files;
+	int  cnt_encountered_dirs;
+	int  cnt_encountered_leafs;
+	int  cnt_shortlist_files;
+	int  cnt_shortlist_dirs;
+
+	int  cnt_scanned_dirs;
+
+	int  cnt_xfered_files;
+	long long int cnt_xfered_bytes;
+	int  cnt_xfer_execs;
+*/
+	timersub (&now, &total.start, &tdiff);
+
+	tout("-------------------------------------------\n");
+	tout("Field                 Interval      Total\n");
+	tout("Time_Sec          : %10ld %10ld\n",
+	     idiff.tv_sec, tdiff.tv_sec);
+	tout("Encountered_Files : %10d %10d\n",
+	     interval.cnt_encountered_files, total.cnt_encountered_files);
+	tout("Encountered_Dirs  : %10d %10d\n",
+	     interval.cnt_encountered_dirs, total.cnt_encountered_dirs);
+	tout("Encountered_Leafs : %10d %10d\n",
+	     interval.cnt_encountered_leafs, total.cnt_encountered_leafs);
+	tout("Shortlist_Files   : %10d %10d\n",
+	     interval.cnt_shortlist_files, total.cnt_shortlist_files);
+	tout("Shortlist_Dirs    : %10d %10d\n",
+	     interval.cnt_shortlist_dirs, total.cnt_shortlist_dirs);
+	tout("Scanned_Dirs      : %10d %10d\n",
+	     interval.cnt_scanned_dirs, total.cnt_scanned_dirs);
+	tout("Transferred_Files : %10d %10d\n",
+	     interval.cnt_xfered_files, total.cnt_xfered_files);
+	tout("Transferred_Bytes : %10lld %10lld\n",
+	     interval.cnt_xfered_bytes, total.cnt_xfered_bytes);
+	tout("Transfer_Count    : %10d %10d\n",
+	     interval.cnt_xfer_execs, total.cnt_xfer_execs);
+	tout("-------------------------------------------\n");
+}
+
+#define BUMP(name) INC(name, 1)
 
 #define DEFAULT_WORKERS 2
 
@@ -63,7 +164,6 @@ int XFER_MODE; /* 0=default -1=none 1=all */
 
 /* ENV variables */
 int DEBUG;
-int STATS;
 
 int REPLICA;
 int INDEX;
@@ -225,6 +325,7 @@ dirjob_update (struct dirjob *job)
 	if (ret)
 		terr ("set_xtime(%s): %s\n", job->dirname, strerror (errno));
 
+	stats_dump (0);
 	return ret;
 }
 
@@ -252,7 +353,7 @@ dirjob_ret (struct dirjob *job, int err)
 		if (ret)
 			terr ("Failed: %s (%d)\n", job->dirname, ret);
 		else
-			tout ("Finished: %s\n", job->dirname);
+			tdbg ("Finished: %s\n", job->dirname);
 
 		parent = job->parent;
 		if (parent)
@@ -467,10 +568,13 @@ xworker_do_xfer (struct xwork *xwork, struct list_head *jobs)
 		return -1;
 	}
 
+	BUMP(xfer_execs);
 	list_for_each_entry (job, jobs, list) {
 		list_for_each_entry (entry, &job->files, list) {
 			fprintf (fp, "%s/%s\n", job->dirname,
 				 entry->xd_name);
+			BUMP(xfered_files);
+			INC(xfered_bytes, entry->xd_stbuf.st_size);
 		}
 	}
 
@@ -479,7 +583,7 @@ xworker_do_xfer (struct xwork *xwork, struct list_head *jobs)
 	if (ret) {
 		list_for_each_entry (job, jobs, list)
 			break;
-		terr ("%s: xfer failed\n", job->dirname);
+		terr ("%s: xfer failed (%d)\n", job->dirname, ret);
 	}
 
 	return ret;
@@ -504,8 +608,6 @@ xworker_do_crawl (struct xwork *xwork, struct dirjob *job)
 	int             ecount = 0;
 	int             esize = 0;
 	int             i = 0;
-	int             filecnt = 0;
-	int             dircnt = 0;
 	struct dirjob  *cjob = NULL;
 
 
@@ -604,6 +706,11 @@ xworker_do_crawl (struct xwork *xwork, struct dirjob *job)
 			return -1;
 		}
 
+		if (S_ISDIR (entry->xd_stbuf.st_mode))
+			BUMP(encountered_dirs);
+		else
+			BUMP(encountered_files);
+
 		if (skip_mode (&entry->xd_stbuf))
 			continue;
 
@@ -625,21 +732,19 @@ xworker_do_crawl (struct xwork *xwork, struct dirjob *job)
 
 		if (S_ISDIR (entry->xd_stbuf.st_mode)) {
 			list_add_tail (&entry->list, &job->dirs);
-			dircnt++;
+			BUMP(shortlist_dirs);
 		} else {
 			if (XFER_MODE == -1)
 				continue;
 
 			list_add_tail (&entry->list, &job->files);
-			filecnt++;
+			BUMP(shortlist_files);
 		}
 	}
 
 	if (XFER_MODE == -1)
 		/* reset the old stime back in dirjob_update() */
 		job->xtime = job->stime;
-
-	tdbg ("%s: filecnt=%d dircnt=%d\n", job->dirname, filecnt, dircnt);
 
 	if (!list_empty (&job->files)) {
 		dirjob_ref (job);
@@ -660,6 +765,7 @@ xworker_do_crawl (struct xwork *xwork, struct dirjob *job)
 		if (entry->xd_stbuf.st_nlink == 2) {
 			/* leaf node */
 			xwork_addcrawl (xwork, cjob);
+			BUMP(encountered_leafs);
 		} else {
 			ret = xworker_do_crawl (xwork, cjob);
 			dirjob_ret (cjob, ret);
@@ -673,6 +779,8 @@ out:
 	if (dirp)
 		closedir (dirp);
 
+	BUMP(scanned_dirs);
+
 	return ret;
 }
 
@@ -685,7 +793,6 @@ xworker_crawl (void *data)
 	int            ret = -1;
 
 	while ((job = xwork_pick (xwork, 1, 1))) {
-		tdbg ("Picked: %s\n", job->dirname);
 		ret = xworker_do_crawl (xwork, job);
 		dirjob_ret (job, ret);
 	}
@@ -814,7 +921,7 @@ xfind (const char *basedir)
 		return -1;
 	}
 
-	tout ("Working directory: %s\n", cwd);
+	tdbg ("Working directory: %s\n", cwd);
 	free (cwd);
 
 	memset (&xwork, 0, sizeof (xwork));
@@ -823,6 +930,7 @@ xfind (const char *basedir)
 		xworker_crawl (&xwork);
 
 	ret = xwork_fini (&xwork, ret);
+	stats_dump (1);
 
 	return ret;
 }
@@ -907,8 +1015,12 @@ parse_env (void)
 	if (getenv ("DEBUG"))
 		DEBUG = 1;
 
-	if (getenv ("STATS"))
+	if (getenv ("STATS")) {
 		STATS = 1;
+		pthread_spin_init (&stats_lock, PTHREAD_PROCESS_PRIVATE);
+		gettimeofday (&stats_interval.start, NULL);
+		gettimeofday (&stats_total.start, NULL);
+	}
 
 	XFER_MODE = 0;
 
