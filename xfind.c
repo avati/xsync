@@ -552,8 +552,10 @@ xworker_do_xfer (struct xwork *xwork, struct list_head *jobs)
 	int             ret = -1;
 	struct dirjob  *job = NULL;
 	struct xdirent *entry = NULL;
+	int             filecnt = 0;
+	long long int   bytes = 0;
 
-	asprintf (&xfer_cmd, "sh -c '%s'", XFER_CMD);
+	asprintf (&xfer_cmd, "/bin/bash -c '%s'", XFER_CMD);
 	if (!xfer_cmd) {
 		terr ("%s: asprintf failed\n", job->dirname);
 		return -1;
@@ -568,22 +570,26 @@ xworker_do_xfer (struct xwork *xwork, struct list_head *jobs)
 		return -1;
 	}
 
-	BUMP(xfer_execs);
 	list_for_each_entry (job, jobs, list) {
 		list_for_each_entry (entry, &job->files, list) {
 			fprintf (fp, "%s/%s\n", job->dirname,
 				 entry->xd_name);
-			BUMP(xfered_files);
-			INC(xfered_bytes, entry->xd_stbuf.st_size);
+			filecnt++;
+			bytes += entry->xd_stbuf.st_size;
 		}
 	}
 
 	ret = pclose (fp);
 	ret = WEXITSTATUS(ret);
+
 	if (ret) {
 		list_for_each_entry (job, jobs, list)
 			break;
 		terr ("%s: xfer failed (%d)\n", job->dirname, ret);
+	} else {
+		BUMP(xfer_execs);
+		INC(xfered_files, filecnt);
+		INC(xfered_bytes, bytes);
 	}
 
 	return ret;
