@@ -168,6 +168,7 @@ int DEBUG;
 int REPLICA;
 int INDEX;
 int WORKERS;
+int MB_PER_TAR;
 
 #define DEFAULT_XFER_CMD "false"
 
@@ -264,6 +265,10 @@ struct dirjob {
 	struct timeval      stime;
 	int                 ret;    /* final status of this subtree */
 	int                 refcnt; /* how many dirjobs have this as parent */
+
+	int                 filecnt;
+	int                 dircnt;
+	long long int       filesize;
 
 	struct xdirent     *entries;
 	struct list_head    files;  /* xdirents of shortlisted files */
@@ -617,6 +622,7 @@ xworker_do_crawl (struct xwork *xwork, struct dirjob *job)
 	struct dirjob  *cjob = NULL;
 	int             filecnt = 0;
 	int             dircnt = 0;
+	long long int   filesize = 0;
 
 
 	plen = strlen (job->dirname) + 256 + 2;
@@ -714,10 +720,12 @@ xworker_do_crawl (struct xwork *xwork, struct dirjob *job)
 			return -1;
 		}
 
-		if (S_ISDIR (entry->xd_stbuf.st_mode))
+		if (S_ISDIR (entry->xd_stbuf.st_mode)) {
 			dircnt++;
-		else
+		} else {
 			filecnt++;
+			filesize += entry->xd_stbuf.st_size;
+		}
 
 		if (skip_mode (&entry->xd_stbuf))
 			continue;
@@ -749,6 +757,10 @@ xworker_do_crawl (struct xwork *xwork, struct dirjob *job)
 			BUMP(shortlist_files);
 		}
 	}
+
+	job->filecnt = filecnt;
+	job->filesize = filesize;
+	job->dircnt = dircnt;
 
 	INC(encountered_dirs, dircnt);
 	INC(encountered_files, filecnt);
@@ -820,13 +832,20 @@ xworker_xfer (void *data)
 	struct dirjob    *tmp = NULL;
 	int               ret = -1;
 	struct list_head  jobs;
+	long long int     filesize = 0;
 
 	while ((job = xwork_pick (xwork, 0, 1))) {
 		INIT_LIST_HEAD (&jobs);
 		list_add_tail (&job->list, &jobs);
+		filesize += job->filesize;
 
-		while ((job = xwork_pick (xwork, 0, 0)))
+		while ((job = xwork_pick (xwork, 0, 0))) {
 			list_add_tail (&job->list, &jobs);
+			filesize += job->filesize;
+
+			if (MB_PER_TAR < (filesize / 1048576))
+				break;
+		}
 
 		ret = xworker_do_xfer (xwork, &jobs);
 
@@ -1042,6 +1061,11 @@ parse_env (void)
 
 		if (strcasecmp (xfer_mode_str, "NONE") == 0)
 			XFER_MODE = -1;
+	}
+
+	if (setenvint ("MB_PER_TAR", &MB_PER_TAR) == -1) {
+		tout ("Defaulting MB_PER_TAR to 32\n");
+		MB_PER_TAR = 32;
 	}
 
 	return 0;

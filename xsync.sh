@@ -42,6 +42,7 @@ REPLICA=1
 #STATS=1    # set to 1 to enable statistics
 #XFER_XATTR=1 # set to 1 to transfer XATTR
 #SHARE_SSH=1 # set to 1 to share SSH sessions
+#MB_PER_TAR= # set to 16 or 32 etc.
 
 shopt -s expand_aliases;
 
@@ -949,6 +950,7 @@ function do_xfind()
     export XFER_CMD
     export XFER_XATTR
     export SHARE_SSH
+    export MB_PER_TAR
 
     unset PFX;
     $(dirname $0)/xfind $SCANDIR;
