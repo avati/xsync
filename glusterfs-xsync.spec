@@ -1,6 +1,6 @@
 Summary: xtime based remote synchronization for glusterfs
 Name: glusterfs-xsync
-Version: 0.10
+Version: 0.11
 Release: 1%{?dist}
 License: LGPLv3
 Group: System Environment/Base
