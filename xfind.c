@@ -155,6 +155,9 @@ unlock:
 	     interval.cnt_xfered_bytes, total.cnt_xfered_bytes);
 	tout("Transfer_Count    : %10d %10d\n",
 	     interval.cnt_xfer_execs, total.cnt_xfer_execs);
+	tout("Throughput MB/s   : %10lld %10lld\n",
+	     (interval.cnt_xfered_bytes / (1048586 * (idiff.tv_sec?idiff.tv_sec:1))),
+	     (total.cnt_xfered_bytes / (1048586 * (tdiff.tv_sec?tdiff.tv_sec:1))));
 	tout("-------------------------------------------\n");
 }
 
@@ -1050,6 +1053,8 @@ parse_env (void)
 	if (getenv ("STATS")) {
 		STATS = 1;
 		pthread_spin_init (&stats_lock, PTHREAD_PROCESS_PRIVATE);
+		memset (&stats_interval, 0, sizeof (stats_interval));
+		memset (&stats_total, 0, sizeof (stats_total));
 		gettimeofday (&stats_interval.start, NULL);
 		gettimeofday (&stats_total.start, NULL);
 	}
