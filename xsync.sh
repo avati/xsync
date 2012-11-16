@@ -27,7 +27,6 @@ MOUNT=            # /proc/$MONITOR/cwd
 TAR_FROM_FUSE=yes  # tar directly from backend or from FUSE mount?
 
 HEARTBEAT_INTERVAL=30  # between idler on salve and master
-PARALLEL_TARS=${PARALLEL_TARS:-3}   # maximum number of parallel transfers
 
 PIDFILE=/dev/null  # will get set in parse_cli
 LOGFILE=/dev/stderr # will get set in parse_cli
@@ -43,6 +42,10 @@ REPLICA=1
 #XFER_XATTR=1 # set to 1 to transfer XATTR
 #SHARE_SSH=1 # set to 1 to share SSH sessions
 #MB_PER_TAR= # set to 16 or 32 etc.
+PARALLEL_TARS=${PARALLEL_TARS:-3}   # maximum number of parallel transfers
+FUSE_TIMEOUT=${FUSE_TIMEOUT:-1}
+#XFER_MODE=all|none
+#DUMMY_UNTAR=1
 
 shopt -s expand_aliases;
 
@@ -235,7 +238,7 @@ function mount_client()
 
     [ -d "$T" ] || fatal "$T: not a directory";
 
-    glusterfs -s localhost --volfile-id $MASTER --client-pid=-1 $T --attribute-timeout=10 --entry-timeout=10;
+    glusterfs -s localhost --volfile-id $MASTER --client-pid=-1 $T --attribute-timeout=$FUSE_TIMEOUT --entry-timeout=$FUSE_TIMEOUT;
 
     i=$(stat -c '%i' $T);
 
@@ -1014,7 +1017,7 @@ function idler()
 function do_mount() {
 v=\$1;
 d=\$(mktemp -d 2>/dev/null);
-glusterfs -s localhost --xlator-option="*dht.lookup-unhashed=off" --volfile-id \$v --client-pid=-1 --attribute-timeout=10 --entry-timeout=10 -l /var/log/glusterfs/geo-replication-slaves/slave.log \$d;
+glusterfs -s localhost --xlator-option="*dht.lookup-unhashed=off" --volfile-id \$v --client-pid=-1 --attribute-timeout=$FUSE_TIMEOUT --entry-timeout=$FUSE_TIMEOUT -l /var/log/glusterfs/geo-replication-slaves/slave.log \$d;
 cd \$d;
 umount -l \$d;
 rmdir \$d;
