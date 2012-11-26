@@ -168,15 +168,15 @@ function parse_slave()
     next=${slave/*:/};
 
     if [[ "$next" =~ .*/.* ]]; then
-	SLAVEMOUNT=$next;
-	info "Slave path is $SLAVEMOUNT";
+	SLAVEPATH=$next;
+	info "Slave path is $SLAVEPATH";
     else
 	SLAVEVOL=$next;
 	info "Slave volume is $SLAVEVOL";
     fi
 
     [ "x$SLAVEHOST" = "x" ] && fatal "Invalid SLAVESPEC $1";
-    [ "x$SLAVEVOL" = "x" -a "x$SLAVEMOUNT" = "x" ] && \
+    [ "x$SLAVEVOL" = "x" -a "x$SLAVEPATH" = "x" ] && \
 	fatal "Invalid SLAVESPEC $1";
 }
 
@@ -1100,7 +1100,12 @@ function monitor()
 	    continue;
 	fi
 
-	SLAVEMOUNT=${SLAVEMOUNT:=/proc/$SLAVEPID/cwd};
+	if [ "x$SLAVEPATH" != "x" ]; then
+	    SLAVEMOUNT=$SLAVEPATH;
+	else
+	    SLAVEMOUNT=/proc/$SLAVEPID/cwd;
+	fi
+
 	info "Slave PID is $SLAVEPID. Path is $SLAVEMOUNT";
 
 	for dir in ${!LOCAL_EXPORTS[*]}; do
