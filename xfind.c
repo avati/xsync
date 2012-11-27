@@ -65,6 +65,8 @@ struct stats stats_interval;
 struct stats stats_total;
 int STATS;
 
+time_t DEFAULT_STIME;
+
 #define INC(name, val) do {				\
 	if (!STATS)				        \
 		break;					\
@@ -195,6 +197,24 @@ setenvint(const char *str, int *intp)
 
 	if (intp)
 		*intp = i;
+	return 0;
+}
+
+
+int
+setenvtime(const char *str, time_t *timep)
+{
+	char *val = NULL;
+	time_t  i = 0;
+
+	val = getenv (str);
+	if (!val)
+		return -1;
+
+	i = atoll(val);
+
+	if (timep)
+		*timep = i;
 	return 0;
 }
 
@@ -607,6 +627,39 @@ xworker_do_xfer (struct xwork *xwork, struct list_head *jobs)
 
 
 int
+get_default_xtime(struct dirjob *job, struct timeval *tvo)
+{
+	struct timeval tv = {0, };
+	int            ret = -1;
+
+	ret = gettimeofday (&tv, NULL);
+	if (ret)
+		goto out;
+
+	if (tvo)
+		*tvo = tv;
+	ret = 0;
+out:
+	return ret;
+}
+
+
+int
+get_default_stime(struct dirjob *job, struct timeval *tvo)
+{
+	if (!tvo)
+		return -1;
+
+	if (DEFAULT_STIME) {
+		tvo->tv_sec = DEFAULT_STIME;
+		tvo->tv_usec = 0;
+	}
+
+	return 0;
+}
+
+
+int
 xworker_do_crawl (struct xwork *xwork, struct dirjob *job)
 {
 	DIR            *dirp = NULL;
@@ -636,12 +689,18 @@ xworker_do_crawl (struct xwork *xwork, struct dirjob *job)
 	tdbg ("Entering: %s\n", job->dirname);
 
 	ret = get_xtime (job->dirname, xtime_key, &job->xtime);
+	if (ret)
+		ret = get_default_xtime (job, &job->xtime);
+
 	if (ret) {
 		terr ("xtime missing on %s\n", job->dirname);
 		goto out;
 	}
 
 	ret = get_xtime (job->dirname, stime_key, &job->stime);
+	if (ret)
+		ret = get_default_stime (job, &job->stime);
+
 	if (ret) {
 		tdbg ("stime missing on %s\n", job->dirname);
 	}
@@ -1073,6 +1132,11 @@ parse_env (void)
 	if (setenvint ("MB_PER_TAR", &MB_PER_TAR) == -1) {
 		tout ("Defaulting MB_PER_TAR to 32\n");
 		MB_PER_TAR = 32;
+	}
+
+	if (setenvtime ("DEFAULT_STIME", &DEFAULT_STIME) == -1) {
+		tout ("Setting DEFAULT_STIME to %d\n", 0);
+		DEFAULT_STIME = 0;
 	}
 
 	return 0;
