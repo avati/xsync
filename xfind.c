@@ -8,11 +8,6 @@
   cases as published by the Free Software Foundation.
 */
 
-
-/*
-  - stats
-*/
-
 #define _GNU_SOURCE
 
 #include <stdio.h>
@@ -119,20 +114,7 @@ unlock:
 
 	if (!dump)
 		return;
-/*
-	struct timeval start;
-	int  cnt_encountered_files;
-	int  cnt_encountered_dirs;
-	int  cnt_encountered_leafs;
-	int  cnt_shortlist_files;
-	int  cnt_shortlist_dirs;
 
-	int  cnt_scanned_dirs;
-
-	int  cnt_xfered_files;
-	long long int cnt_xfered_bytes;
-	int  cnt_xfer_execs;
-*/
 	timersub (&now, &total.start, &tdiff);
 
 	tout("-------------------------------------------\n");
