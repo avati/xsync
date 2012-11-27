@@ -46,6 +46,7 @@ PARALLEL_TARS=${PARALLEL_TARS:-2}   # maximum number of parallel transfers
 FUSE_TIMEOUT=${FUSE_TIMEOUT:-1}
 #XFER_MODE=all|none
 #DUMMY_UNTAR=1
+FIXED_INDEX=${FIXED_INDEX:-}
 
 shopt -s expand_aliases;
 
@@ -1109,7 +1110,12 @@ function monitor()
 	info "Slave PID is $SLAVEPID. Path is $SLAVEMOUNT";
 
 	for dir in ${!LOCAL_EXPORTS[*]}; do
-	    worker $dir ${LOCAL_EXPORTS[$dir]} &
+	    if [ "x$FIXED_INDEX" != "x" ]; then
+		THIS_INDEX=$FIXED_INDEX;
+	    else
+		THIS_INDEX=${LOCAL_EXPORTS[$dir]};
+	    fi
+	    worker $dir $THIS_INDEX &
 	    sleep 0.1
 	done
 
