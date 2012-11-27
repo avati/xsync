@@ -2,7 +2,7 @@
 
 function SSH()
 {
-    if [ ! -z "$SHARE_SSH" ]; then
+    if [ "x$SHARE_SSH" = "x1" ]; then
 	ssh -qi $SSHKEY \
             -oPasswordAuthentication=no \
             -oStrictHostKeyChecking=no \
