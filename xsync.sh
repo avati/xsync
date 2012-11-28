@@ -36,13 +36,14 @@ BRICKS=            # total number of bricks
 SRCDIR=            # set to either MOUNT or SCANDIR based on TAR_FROM_FUSE
 
 REPLICA=1
+FIXED_REPLICA=${FIXED_REPLICA:-}
 
 #DEBUG=1    # set to 1 to enable debugging
 #STATS=1    # set to 1 to enable statistics
 #XFER_XATTR=1 # set to 1 to transfer XATTR
 SHARE_SSH=${SHARE_SSH:-1} # set to 1 to share SSH sessions
 #MB_PER_TAR= # set to 16 or 32 etc.
-PARALLEL_TARS=${PARALLEL_TARS:-2}   # maximum number of parallel transfers
+PARALLEL_TARS=${PARALLEL_TARS:-3}   # maximum number of parallel transfers
 FUSE_TIMEOUT=${FUSE_TIMEOUT:-1}
 #XFER_MODE=all|none
 #DUMMY_UNTAR=1
@@ -149,10 +150,15 @@ function parse_master()
     VOLUMEID=$(gluster volume info $vol | grep 'Volume ID:' | cut -f3 -d' ');
     [ "x$VOLUMEID" = "x" ] && fatal "no volume ID for volume $MASTER";
 
-    if gluster volume info $vol | grep Type: | grep -iq Replicate; then
-	REPLICA=$(gluster volume info $vol | \
-	    sed -rn 's#Number of Bricks:.*x ([0-9]+) =.*#\1#p');
+    if [ -z "$FIXED_REPLICA" ]; then
+	if gluster volume info $vol | grep Type: | grep -iq Replicate; then
+	    REPLICA=$(gluster volume info $vol | \
+		sed -rn 's#Number of Bricks:.*x ([0-9]+) =.*#\1#p');
+	fi
+    else
+	REPLICA=$FIXED_REPLICA;
     fi
+
     info "Replicas in $vol = $REPLICA";
 }
 
