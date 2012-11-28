@@ -885,12 +885,16 @@ xworker_xfer (void *data)
 		list_add_tail (&job->list, &jobs);
 		filesize += job->filesize;
 
-		while ((job = xwork_pick (xwork, 0, 0))) {
-			list_add_tail (&job->list, &jobs);
-			filesize += job->filesize;
-
+		for (;;) {
 			if (MB_PER_TAR < (filesize / 1048576))
 				break;
+
+			job = xwork_pick (xwork, 0, 0);
+			if (!job)
+				break;
+
+			list_add_tail (&job->list, &jobs);
+			filesize += job->filesize;
 		}
 
 		ret = xworker_do_xfer (xwork, &jobs);
